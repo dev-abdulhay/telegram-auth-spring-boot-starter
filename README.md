@@ -14,22 +14,22 @@ session cookie — whatever the host app needs).
 
 ## Install
 
-**Gradle (Kotlin DSL):**
-
-```kotlin
-dependencies {
-    implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.1.0")
-}
-```
-
 **Maven:**
 
 ```xml
 <dependency>
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1</version>
 </dependency>
+```
+
+**Gradle (Kotlin DSL):**
+
+```kotlin
+dependencies {
+    implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.1.1")
+}
 ```
 
 ## Quickstart
