@@ -36,7 +36,7 @@ import java.time.Duration;
 @EnableConfigurationProperties(TelegramAuthProperties.class)
 @EnableScheduling
 @EnableJpaRepositories(basePackages = "io.github.dev_abdulhay.telegramauth.repository")
-@Import({TelegramAuthEntityScanConfig.class, TelegramAuthController.class})
+@Import(TelegramAuthController.class)
 public class TelegramAuthAutoConfiguration {
 
     @Bean
