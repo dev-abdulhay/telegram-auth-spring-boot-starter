@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.20.xsd">
+
+    <changeSet id="tg-auth-0001-initial" author="abdulhaybro">
+        <createTable tableName="tg_auth_telegram_user">
+            <column name="id" type="BIGINT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="telegram_id" type="BIGINT">
+                <constraints nullable="false" unique="true"/>
+            </column>
+            <column name="phone" type="VARCHAR(20)"/>
+            <column name="first_name" type="VARCHAR(100)"/>
+            <column name="last_name" type="VARCHAR(100)"/>
+            <column name="username" type="VARCHAR(50)"/>
+            <column name="language_code" type="VARCHAR(5)"/>
+            <column name="status" type="VARCHAR(30)" defaultValue="PENDING_CONFIRM">
+                <constraints nullable="false"/>
+            </column>
+            <column name="external_user_id" type="VARCHAR(100)"/>
+            <column name="created_at" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <createIndex tableName="tg_auth_telegram_user" indexName="ix_tg_auth_user_phone">
+            <column name="phone"/>
+        </createIndex>
+
+        <createTable tableName="tg_auth_session">
+            <column name="id" type="BIGINT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="token_hash" type="VARCHAR(64)">
+                <constraints nullable="false" unique="true"/>
+            </column>
+            <column name="telegram_user_id" type="BIGINT"/>
+            <column name="status" type="VARCHAR(20)" defaultValue="PENDING">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ip_address" type="VARCHAR(45)"/>
+            <column name="user_agent" type="VARCHAR(500)"/>
+            <column name="created_at" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="expires_at" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="false"/>
+            </column>
+            <column name="approved_at" type="TIMESTAMP WITH TIME ZONE"/>
+        </createTable>
+        <createIndex tableName="tg_auth_session" indexName="ix_tg_auth_session_status_expires">
+            <column name="status"/>
+            <column name="expires_at"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>
