@@ -68,39 +68,6 @@ jobs:
         run: |
           mvn -B -ntp versions:set -DnewVersion="${RELEASE_VERSION}" -DgenerateBackupPoms=false
 
-      - name: Diagnostic — verify Sonatype credentials reach runner intact
-        env:
-          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
-          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
-        run: |
-          echo "username length: ${#SONATYPE_USERNAME}"
-          echo "password length: ${#SONATYPE_PASSWORD}"
-          # Verify settings.xml was written and contains a non-empty username
-          if [ -f ~/.m2/settings.xml ]; then
-            sm_user_len=$(awk -F'[<>]' '/<username>/{print length($3)}' ~/.m2/settings.xml)
-            sm_pass_len=$(awk -F'[<>]' '/<password>/{print length($3)}' ~/.m2/settings.xml)
-            echo "settings.xml username length: ${sm_user_len}"
-            echo "settings.xml password length: ${sm_pass_len}"
-          else
-            echo "settings.xml not found"
-          fi
-          # Test the upload endpoint directly with the same auth header that
-          # central-publishing-maven-plugin would send. We don't actually need
-          # to upload anything valid — we just want to see whether Sonatype
-          # rejects auth (401) or accepts auth and rejects the bundle (4xx).
-          TOKEN=$(printf '%s:%s' "$SONATYPE_USERNAME" "$SONATYPE_PASSWORD" | base64 -w0 2>/dev/null || printf '%s:%s' "$SONATYPE_USERNAME" "$SONATYPE_PASSWORD" | base64)
-          echo "base64 token length: ${#TOKEN}"
-          echo "dummy" > /tmp/dummy.zip
-          HTTP_CODE=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            -F "bundle=@/tmp/dummy.zip" \
-            "https://central.sonatype.com/api/v1/publisher/upload" || echo "curl-failed")
-          echo "Sonatype upload endpoint HTTP code: $HTTP_CODE"
-          echo "--- response body (first 300 chars) ---"
-          head -c 300 /tmp/resp.txt || true
-          rm -f /tmp/dummy.zip /tmp/resp.txt
-
       - name: Maven deploy (sign + publish to Sonatype Central Portal)
         env:
           MAVEN_GPG_PASSPHRASE: ${{ secrets.SIGNING_PASSWORD }}
