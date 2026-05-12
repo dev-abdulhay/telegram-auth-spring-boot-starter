@@ -20,7 +20,7 @@ session cookie — whatever the host app needs).
 <dependency>
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
 </dependency>
 ```
 
@@ -28,7 +28,7 @@ session cookie — whatever the host app needs).
 
 ```kotlin
 dependencies {
-    implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.1.1")
+    implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.1.2")
 }
 ```
 
@@ -66,6 +66,12 @@ dependencies {
    ```
 
 That's it. The starter exposes the REST API below.
+
+> **Entity scanning.** The starter registers its own JPA entities additively via
+> `@AutoConfigurationPackage`. You do **not** need to add an `@EntityScan` (or
+> widen an existing one) in your `@SpringBootApplication` to make the starter's
+> entities visible — and your own entities remain picked up by Spring Boot's
+> default scan.
 
 ## REST API
 
