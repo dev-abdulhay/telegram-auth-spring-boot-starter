@@ -14,12 +14,12 @@ account, namespace, GPG key, GitHub secrets) and the **per-release procedure**.
 
 ### 1.1 Create a GitHub repository
 
-The chosen `groupId` is `io.github.abdulhaybro` — that's the reverse of the
-GitHub URL `github.com/abdulhaybro`. Central verifies ownership of this
+The chosen `groupId` is `io.github.dev-abdulhay` — that's the reverse of the
+GitHub URL `github.com/dev-abdulhay`. Central verifies ownership of this
 namespace by checking that the matching GitHub account exists and that you can
 prove control of it.
 
-1. Create a public repo: `github.com/abdulhaybro/telegram-auth-spring-boot-starter`.
+1. Create a public repo: `github.com/dev-abdulhay/telegram-auth-spring-boot-starter`.
 2. Push this codebase to it.
 
 ### 1.2 Sign up for the Sonatype Central Portal
@@ -34,13 +34,13 @@ prove control of it.
    - Save both. They go into GitHub secrets below as `SONATYPE_USERNAME`
      and `SONATYPE_PASSWORD`.
 
-### 1.3 Verify the `io.github.abdulhaybro` namespace
+### 1.3 Verify the `io.github.dev-abdulhay` namespace
 
 1. Central → **Namespaces** → **Add Namespace**.
-2. Enter `io.github.abdulhaybro`.
+2. Enter `io.github.dev-abdulhay`.
 3. Central instructs you to **create a public GitHub repository whose name
    matches a verification code** (something like `OSSRH-12345`).
-4. Create that repo on `github.com/abdulhaybro` and click **Verify**.
+4. Create that repo on `github.com/dev-abdulhay` and click **Verify**.
 5. Once verified you can delete the verification repo. The namespace stays
    verified.
 
@@ -127,7 +127,7 @@ That triggers `.github/workflows/release.yml`, which:
    if Central's validation passes (no manual "close & release" step).
 
 After a few minutes the artifact appears at
-<https://central.sonatype.com/artifact/io.github.abdulhaybro/telegram-auth-spring-boot-starter>
+<https://central.sonatype.com/artifact/io.github.dev-abdulhay/telegram-auth-spring-boot-starter>
 and propagates to Maven Central proper within ~30 min.
 
 ### 2.3 Watch the workflow
@@ -153,7 +153,7 @@ You can verify the artifacts locally without uploading:
 ./gradlew clean publishToMavenLocal
 
 # Inspect the staged artifacts
-ls ~/.m2/repository/io/github/abdulhaybro/telegram-auth-spring-boot-starter/0.1.0/
+ls ~/.m2/repository/io/github/dev-abdulhay/telegram-auth-spring-boot-starter/0.1.0/
 ```
 
 For a signed local build that mirrors what CI uploads, you need GPG configured
@@ -199,4 +199,4 @@ Any breaking change at 0.x bumps the minor and is called out in
 - vanniktech/gradle-maven-publish-plugin (used by `build.gradle.kts`):
   <https://vanniktech.github.io/gradle-maven-publish-plugin/central/>
 - Central Portal artifact page (once published):
-  <https://central.sonatype.com/artifact/io.github.abdulhaybro/telegram-auth-spring-boot-starter>
+  <https://central.sonatype.com/artifact/io.github.dev-abdulhay/telegram-auth-spring-boot-starter>
