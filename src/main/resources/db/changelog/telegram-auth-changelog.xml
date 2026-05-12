@@ -5,7 +5,7 @@
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
                             https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.20.xsd">
 
-    <changeSet id="tg-auth-0001-initial" author="abdulhaybro">
+    <changeSet id="tg-auth-0001-initial" author="dev-abdulhay">
         <createTable tableName="tg_auth_telegram_user">
             <column name="id" type="BIGINT" autoIncrement="true">
                 <constraints primaryKey="true" nullable="false"/>

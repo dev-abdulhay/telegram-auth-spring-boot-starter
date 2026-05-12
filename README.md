@@ -5,7 +5,7 @@ service. A web/mobile client kicks off a login session, the user confirms in a
 Telegram bot, and the backend returns a project-defined login payload (JWT,
 session cookie — whatever the host app needs).
 
-[![Maven Central](https://img.shields.io/maven-central/v/io.github.abdulhaybro/telegram-auth-spring-boot-starter.svg)](https://central.sonatype.com/artifact/io.github.abdulhaybro/telegram-auth-spring-boot-starter)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.dev-abdulhay/telegram-auth-spring-boot-starter.svg)](https://central.sonatype.com/artifact/io.github.dev-abdulhay/telegram-auth-spring-boot-starter)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 > **Status: MVP (Phase 1).** Long-polling transport, in-memory event bus, single
@@ -18,7 +18,7 @@ session cookie — whatever the host app needs).
 
 ```kotlin
 dependencies {
-    implementation("io.github.abdulhaybro:telegram-auth-spring-boot-starter:0.1.0")
+    implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.1.0")
 }
 ```
 
@@ -26,7 +26,7 @@ dependencies {
 
 ```xml
 <dependency>
-    <groupId>io.github.abdulhaybro</groupId>
+    <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
     <version>0.1.0</version>
 </dependency>
