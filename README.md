@@ -131,6 +131,8 @@ prefix, `@Table` names, bot token, and `TelegramBotModule` bean.
 | `GET`  | `/session/{token}/status` | Cheap status check. |
 | `DELETE` | `/session/{token}` | Abort a pending session. |
 
+> **Payload delivery.** The approval payload (whatever your `TelegramAuthApproveHandler` returns) is delivered **once**, on the long-poll connection that is open when the approval happens. It is not persisted server-side. If a client's `/poll` connection drops and it re-polls an already-`APPROVED` session, the response is `{ "status": "APPROVED" }` with an empty payload. Clients should treat an interrupted poll as needing a fresh login session, or keep the long-poll open until it returns.
+
 ## Configuration reference
 
 ```yaml
