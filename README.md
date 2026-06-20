@@ -8,9 +8,9 @@ session cookie — whatever the host app needs).
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.dev-abdulhay/telegram-auth-spring-boot-starter.svg)](https://central.sonatype.com/artifact/io.github.dev-abdulhay/telegram-auth-spring-boot-starter)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status: MVP (Phase 1).** Long-polling transport, in-memory event bus, single
-> instance. SSE / WebSocket / Redis-backed bus / runtime reconfiguration are on
-> the roadmap (see `tasks/tech-doc/TECH_DOC.md`).
+> **Status: v0.2.0 — abstract multi-instance toolkit.** The starter ships only
+> generic base classes. You write the entities, repositories, services, and
+> controllers; the starter wires the bot lifecycle and event bus.
 
 ## Install
 
@@ -20,7 +20,7 @@ session cookie — whatever the host app needs).
 <dependency>
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.1.2</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
@@ -28,70 +28,108 @@ session cookie — whatever the host app needs).
 
 ```kotlin
 dependencies {
-    implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.1.2")
+    implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.2.0")
 }
 ```
 
-## Quickstart
+## Quickstart (v0.2.0)
 
-1. Add the dependency (above).
-2. Enable the starter and set your bot token:
+The starter ships only abstract base classes. For each user type you write 6
+subclasses + 1 `@Configuration`. The starter creates **no** tables and registers
+**no** controllers — you own those.
+
+1. Enable the starter:
 
    ```yaml
    telegram:
      auth:
        enabled: true
-       bot:
-         token: ${TG_BOT_TOKEN}
-         username: mybot          # without the @
+   admin:
+     bot:
+       token: ${ADMIN_BOT_TOKEN}
    ```
 
-3. Include the Liquibase changelog in your master file:
+2. Create the tables yourself (Liquibase/Flyway/DDL). Example for the admin type:
 
-   ```xml
-   <include file="classpath:/db/changelog/telegram-auth-changelog.xml"/>
+   ```sql
+   create table admin_tg_user (
+     id bigserial primary key,
+     telegram_id bigint not null unique,
+     phone varchar(20), first_name varchar(100), last_name varchar(100),
+     username varchar(50), language_code varchar(5),
+     status varchar(30) not null, external_user_id varchar(100),
+     created_at timestamptz not null, updated_at timestamptz not null
+   );
+   create table admin_tg_session (
+     id bigserial primary key,
+     token_hash varchar(64) not null unique, telegram_user_id bigint,
+     status varchar(20) not null, ip_address varchar(45), user_agent varchar(500),
+     created_at timestamptz not null, expires_at timestamptz not null, approved_at timestamptz
+   );
    ```
 
-4. Provide one `TelegramAuthApproveHandler` bean — the host decides what
-   "login success" returns:
+3. Write the module:
 
    ```java
-   @Bean
-   TelegramAuthApproveHandler approveHandler(JwtService jwt) {
-       return (user, ctx) -> new AuthApproveResult(Map.of(
-           "accessToken", jwt.issue(user.telegramId()),
-           "user", Map.of("id", user.telegramId(), "phone", user.phone())
-       ));
+   @Entity @Table(name = "admin_tg_user")
+   public class AdminUser extends BaseTelegramUser {}
+
+   @Entity @Table(name = "admin_tg_session")
+   public class AdminSession extends BaseAuthSession {}
+
+   public interface AdminUserRepository extends BaseTelegramUserRepository<AdminUser> {}
+   public interface AdminSessionRepository extends BaseAuthSessionRepository<AdminSession> {}
+
+   @Service
+   public class AdminUserService extends AbstractTelegramUserService<AdminUser> {
+       public AdminUserService(AdminUserRepository repo) { super(repo, AdminUser::new); }
+   }
+
+   @Service
+   public class AdminSessionService extends AbstractSessionService<AdminUser, AdminSession> {
+       public AdminSessionService(AdminSessionRepository repo, TokenGenerator tg, TelegramBotModule m) {
+           super(repo, AdminSession::new, tg, m);
+       }
+   }
+
+   @RestController
+   @RequestMapping("/api/admin-auth")
+   public class AdminAuthController extends AbstractTelegramAuthController<AdminUser, AdminSession> {
+       public AdminAuthController(AdminSessionService s, TelegramBotModule m) { super(s, m); }
+   }
+
+   @Configuration
+   public class AdminTgConfig {
+       @Bean
+       TelegramBotModule adminModule(@Value("${admin.bot.token}") String token, JwtService jwt) {
+           return TelegramBotModule.builder(token, "admin_bot")
+               .approveHandler((info, ctx) -> new AuthApproveResult(Map.of(
+                   "accessToken", jwt.issue(info.telegramId()))))
+               .build();
+       }
+       @Bean AdminUserService adminUserService(AdminUserRepository r) { return new AdminUserService(r); }
+       @Bean AdminSessionService adminSessionService(AdminSessionRepository r, TokenGenerator tg, TelegramBotModule m) {
+           return new AdminSessionService(r, tg, m);
+       }
+       // Declaring the default flow bean wires /start automatically.
+       @Bean DefaultAuthFlow<AdminUser, AdminSession> adminFlow(
+               AdminUserService us, AdminSessionService ss, TelegramBotModule m) {
+           return new DefaultAuthFlow<>(us, ss, m);
+       }
    }
    ```
 
-That's it. The starter exposes the REST API below.
+For a second user type (e.g. `customer`), repeat with its own `@RequestMapping`
+prefix, `@Table` names, bot token, and `TelegramBotModule` bean.
 
-> **Entity scanning.** The starter registers its own JPA entities additively via
-> `@AutoConfigurationPackage`. You do **not** need to add an `@EntityScan` (or
-> widen an existing one) in your `@SpringBootApplication` to make the starter's
-> entities visible — and your own entities remain picked up by Spring Boot's
-> default scan.
-
-## REST API
+## REST API (per module, relative to the subclass `@RequestMapping`)
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/tg-auth/session` | Create a login session; returns token + `t.me/<bot>?start=…` deep-link. |
-| `GET`  | `/api/tg-auth/session/{token}/poll` | Long-poll for terminal status; releases on approve / reject / expire. |
-| `GET`  | `/api/tg-auth/session/{token}/status` | Cheap status check (no payload, for diagnostics). |
-| `DELETE` | `/api/tg-auth/session/{token}` | Client aborts a pending session. |
-
-### Flow
-
-```
-client → POST /session                       → { token, botDeepLink }
-client → GET /session/{token}/poll           (held open)
-user   → opens t.me/<bot>?start=<token>
-bot    → /start <token>                      (server side)
-host   → onApprove(user, ctx)                → AuthApproveResult
-client ← 200 { status: APPROVED, payload }   (poll released)
-```
+| `POST` | `/session` | Create a login session; returns token + `t.me/<bot>?start=…`. |
+| `GET`  | `/session/{token}/poll` | Long-poll for terminal status. |
+| `GET`  | `/session/{token}/status` | Cheap status check. |
+| `DELETE` | `/session/{token}` | Abort a pending session. |
 
 ## Configuration reference
 
@@ -99,47 +137,19 @@ client ← 200 { status: APPROVED, payload }   (poll released)
 telegram:
   auth:
     enabled: true                   # master switch
-    base-path: /api/tg-auth         # REST base path
-    bot:
-      token: ${TG_BOT_TOKEN:}
-      username: mybot
-      polling-interval: 1s
-      polling-timeout: 30s
     session:
       ttl: 180s
       cleanup-cron: "0 */5 * * * *"
-    transport:
-      polling:
-        enabled: true
-        max-wait: 30s
-    db:
-      schema: public
-      table-prefix: tg_auth_
-    i18n:
-      default-language: uz
-      supported: [uz, ru, en]
-    rate-limit:
-      enabled: true
-      ip-per-minute: 5
-      ip-per-hour: 30
 ```
-
-## Extension points
-
-| Bean | Required | Purpose |
-|------|----------|---------|
-| `TelegramAuthApproveHandler` | **yes** | What "login success" returns to the client. |
-| `TelegramAuthRegisterHandler` | optional | Hook on first-ever registration; can populate `external_user_id`. |
 
 ## Roadmap
 
-- [x] **Phase 1 (MVP):** Long polling + in-memory bus + Liquibase schema.
-- [ ] **Phase 2:** Contact-share + name-confirm bot UX, Approve/Reject inline keyboard.
+- [x] **Phase 1 (MVP):** Long polling + in-memory bus + single bot.
+- [x] **Phase 2 (v0.2.0):** Abstract multi-instance toolkit — N independent bots,
+      host-owned entities/controllers.
 - [ ] **Phase 3:** SSE & WebSocket transports.
-- [ ] **Phase 4:** Redis-backed event bus, rate limiter, multi-instance.
+- [ ] **Phase 4:** Redis-backed event bus, rate limiter.
 - [ ] **Phase 5:** Runtime bot/proxy reconfiguration, admin endpoints, GeoIP.
-
-See [`tasks/tech-doc/TECH_DOC.md`](tasks/tech-doc/TECH_DOC.md) for the full design.
 
 ## Publishing
 
