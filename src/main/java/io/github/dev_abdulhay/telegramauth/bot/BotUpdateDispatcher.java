@@ -16,7 +16,7 @@ public class BotUpdateDispatcher {
 
     private static final Logger log = LoggerFactory.getLogger(BotUpdateDispatcher.class);
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private final TelegramBotModule module;
 
     public BotUpdateDispatcher(TelegramBotModule module) {
@@ -27,7 +27,7 @@ public class BotUpdateDispatcher {
     public long dispatch(String json) {
         long maxId = 0;
         try {
-            JsonNode root = mapper.readTree(json);
+            JsonNode root = MAPPER.readTree(json);
             if (!root.path("ok").asBoolean(false)) {
                 log.debug("non-ok getUpdates response");
                 return 0;
