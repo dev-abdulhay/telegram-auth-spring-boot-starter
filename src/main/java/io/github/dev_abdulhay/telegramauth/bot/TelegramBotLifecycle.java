@@ -7,6 +7,7 @@ import org.springframework.context.event.EventListener;
 
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Starts one {@link TelegramBotRunner} per registered {@link TelegramBotModule}
@@ -16,6 +17,7 @@ public class TelegramBotLifecycle {
 
     private final ObjectProvider<TelegramBotModule> modules;
     private final List<TelegramBotRunner> runners = new CopyOnWriteArrayList<>();
+    private final AtomicBoolean started = new AtomicBoolean(false);
 
     public TelegramBotLifecycle(ObjectProvider<TelegramBotModule> modules) {
         this.modules = modules;
@@ -23,6 +25,7 @@ public class TelegramBotLifecycle {
 
     @EventListener(ApplicationReadyEvent.class)
     public void startAll() {
+        if (!started.compareAndSet(false, true)) return;
         modules.forEach(module -> {
             TelegramBotRunner runner = new TelegramBotRunner(module);
             runner.start();
@@ -34,5 +37,6 @@ public class TelegramBotLifecycle {
     public void stopAll() {
         runners.forEach(TelegramBotRunner::stop);
         runners.clear();
+        started.set(false);
     }
 }

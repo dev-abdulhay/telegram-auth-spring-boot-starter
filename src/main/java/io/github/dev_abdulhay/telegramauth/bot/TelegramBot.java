@@ -10,6 +10,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Objects;
 
 /**
  * Thin Telegram Bot API wrapper, one instance per {@link TelegramBotModule}.
@@ -28,8 +29,8 @@ public class TelegramBot {
     }
 
     public TelegramBot(HttpClient http, String token, String baseUrl) {
-        this.http = http;
-        this.token = token;
+        this.http = Objects.requireNonNull(http, "http");
+        this.token = Objects.requireNonNull(token, "token");
         this.baseUrl = baseUrl;
     }
 

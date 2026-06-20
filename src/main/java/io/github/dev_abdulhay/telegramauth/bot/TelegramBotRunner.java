@@ -21,7 +21,7 @@ public class TelegramBotRunner {
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong offset = new AtomicLong(0);
-    private ExecutorService executor;
+    private volatile ExecutorService executor;
 
     public TelegramBotRunner(TelegramBotModule module) {
         this.module = module;
