@@ -19,6 +19,10 @@ public class DemoTgConfig {
         // Custom bot avoids real network during tests.
         TelegramBot fakeBot = new TelegramBot(HttpClient.newHttpClient(), "TEST") {
             @Override public void sendMessage(long chatId, String text) { }
+            @Override public String getUpdates(long offset, int timeoutSeconds) throws Exception {
+                Thread.sleep(300); // interruptible — lets stopAll() break the loop cleanly
+                return "{\"ok\":true,\"result\":[]}";
+            }
         };
         return TelegramBotModule.builder("TEST", "demo_bot")
                 .bot(fakeBot)
