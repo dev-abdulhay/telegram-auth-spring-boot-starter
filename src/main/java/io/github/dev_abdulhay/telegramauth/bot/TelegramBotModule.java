@@ -8,6 +8,7 @@ import io.github.dev_abdulhay.telegramauth.service.InMemoryAuthEventBus;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -65,7 +66,7 @@ public final class TelegramBotModule {
     public TelegramAuthApproveHandler getApproveHandler() { return approveHandler; }
     public TelegramBot getBot() { return bot; }
     public AuthEventBus getBus() { return bus; }
-    public Map<String, Consumer<JsonNode>> getCommands() { return commands; }
+    public Map<String, Consumer<JsonNode>> getCommands() { return Collections.unmodifiableMap(commands); }
     public Consumer<JsonNode> getFallback() { return fallback; }
 
     public static final class Builder {

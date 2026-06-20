@@ -1,7 +1,6 @@
 package com.example.demo;
 
 import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession;
-import io.github.dev_abdulhay.telegramauth.repository.BaseAuthSessionRepository;
 import org.springframework.data.domain.Example;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -17,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 /** Hand-written in-memory repo for unit tests. Only implements what the service uses. */
-@SuppressWarnings({"unchecked", "ConstantConditions", "NullableProblems"})
+@SuppressWarnings({"unchecked", "NullableProblems"})
 public class StubSessionRepo implements DemoSessionRepository {
 
     private final Map<Long, DemoSession> store = new HashMap<>();
