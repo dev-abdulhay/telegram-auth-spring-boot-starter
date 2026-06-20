@@ -1,6 +1,9 @@
 package io.github.dev_abdulhay.telegramauth.config;
 
+import io.github.dev_abdulhay.telegramauth.bot.TelegramBotLifecycle;
+import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.security.TokenGenerator;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -25,5 +28,11 @@ public class TelegramAuthAutoConfiguration {
     @ConditionalOnMissingBean
     public TokenGenerator telegramAuthTokenGenerator() {
         return new TokenGenerator();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public TelegramBotLifecycle telegramBotLifecycle(ObjectProvider<TelegramBotModule> modules) {
+        return new TelegramBotLifecycle(modules);
     }
 }
