@@ -112,6 +112,11 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
         module.getBus().publish(tokenHash, AuthEvent.rejected());
     }
 
+    /**
+     * Marks overdue PENDING sessions as EXPIRED. This method is {@code @Scheduled}, so every
+     * concrete subclass bean becomes its own scheduled sweeper, all sharing the global
+     * {@code telegram.auth.cleanup-cron} expression; override this method to opt out or change cadence.
+     */
     @Scheduled(cron = "${telegram.auth.cleanup-cron:0 */5 * * * *}")
     @Transactional
     public void sweepExpired() {

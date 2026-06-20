@@ -53,6 +53,11 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
                 created.rawToken(), deepLink, created.entity().getExpiresAt(), List.of("POLL"));
     }
 
+    /**
+     * Long-polls for a terminal session status. The approval payload is delivered only on the
+     * active long-poll subscription that is open when the approval occurs; it is not persisted.
+     * A poll of an already-APPROVED session returns status {@code APPROVED} with an empty payload.
+     */
     @GetMapping("/session/{token}/poll")
     public DeferredResult<ResponseEntity<WaitResponse>> poll(@PathVariable String token) {
         String hash = sessionService.hash(token);
