@@ -1,19 +1,21 @@
 package io.github.dev_abdulhay.telegramauth.entity;
 
 import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.Table;
+import jakarta.persistence.MappedSuperclass;
 
 import java.time.OffsetDateTime;
 
-@Entity
-@Table(name = "tg_auth_session")
-public class MTelegramAuthSession {
+/**
+ * Base login session. {@code @MappedSuperclass} — host apps subclass with
+ * {@code @Entity @Table(name = "...")} per user type.
+ */
+@MappedSuperclass
+public abstract class BaseAuthSession {
 
     public enum Status { PENDING, APPROVED, REJECTED, EXPIRED }
 

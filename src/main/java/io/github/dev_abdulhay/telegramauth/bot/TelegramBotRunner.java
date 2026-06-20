@@ -1,8 +1,5 @@
 package io.github.dev_abdulhay.telegramauth.bot;
 
-import io.github.dev_abdulhay.telegramauth.config.TelegramAuthProperties;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -12,67 +9,61 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Owns the long-poll loop. MVP scope: pulls updates from Telegram and hands
- * raw JSON to {@link BotUpdateDispatcher}. Stays running until the Spring
- * context closes.
+ * Owns one long-poll loop for a single {@link TelegramBotModule}. Pulls updates
+ * and hands raw JSON to a {@link BotUpdateDispatcher}.
  */
 public class TelegramBotRunner {
 
     private static final Logger log = LoggerFactory.getLogger(TelegramBotRunner.class);
 
-    private final TelegramBotClient client;
+    private final TelegramBotModule module;
     private final BotUpdateDispatcher dispatcher;
-    private final TelegramAuthProperties props;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong offset = new AtomicLong(0);
-    private ExecutorService executor;
+    private volatile ExecutorService executor;
 
-    public TelegramBotRunner(TelegramBotClient client,
-                             BotUpdateDispatcher dispatcher,
-                             TelegramAuthProperties props) {
-        this.client = client;
-        this.dispatcher = dispatcher;
-        this.props = props;
+    public TelegramBotRunner(TelegramBotModule module) {
+        this.module = module;
+        this.dispatcher = new BotUpdateDispatcher(module);
     }
 
-    @PostConstruct
     public void start() {
-        if (props.getBot().getToken() == null || props.getBot().getToken().isBlank()) {
-            log.warn("telegram.auth.bot.token not set — bot polling disabled");
+        String token = module.getBotToken();
+        if (token == null || token.isBlank()) {
+            log.warn("bot token blank for @{} — polling disabled", module.getUsername());
             return;
         }
         if (!running.compareAndSet(false, true)) return;
         executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "tg-auth-bot-poll");
+            Thread t = new Thread(r, "tg-auth-poll-" + module.getUsername());
             t.setDaemon(true);
             return t;
         });
         executor.submit(this::loop);
-        log.info("Telegram bot polling started, token={}", client.maskedToken());
+        log.info("Telegram polling started for @{}, token={}", module.getUsername(), module.getBot().maskedToken());
     }
 
-    @PreDestroy
     public void stop() {
         if (!running.compareAndSet(true, false)) return;
         if (executor != null) executor.shutdownNow();
-        log.info("Telegram bot polling stopped");
+        log.info("Telegram polling stopped for @{}", module.getUsername());
     }
 
     private void loop() {
-        int timeoutS = (int) props.getBot().getPollingTimeout().toSeconds();
+        int timeoutS = (int) module.getPollingTimeout().toSeconds();
         while (running.get()) {
             try {
-                String json = client.getUpdates(offset.get(), timeoutS);
+                String json = module.getBot().getUpdates(offset.get(), timeoutS);
                 long maxId = dispatcher.dispatch(json);
                 if (maxId > 0) offset.set(maxId + 1);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                log.warn("getUpdates failed; backing off", e);
+                log.warn("getUpdates failed for @{}; backing off", module.getUsername(), e);
                 try {
-                    Thread.sleep(props.getBot().getPollingInterval().toMillis());
+                    Thread.sleep(module.getPollingInterval().toMillis());
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     break;

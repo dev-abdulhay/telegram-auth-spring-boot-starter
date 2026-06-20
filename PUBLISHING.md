@@ -117,12 +117,12 @@ The signed artifacts land in `target/`:
 
 ```
 target/
-  telegram-auth-spring-boot-starter-0.1.1.jar
-  telegram-auth-spring-boot-starter-0.1.1.jar.asc
-  telegram-auth-spring-boot-starter-0.1.1-sources.jar
-  telegram-auth-spring-boot-starter-0.1.1-sources.jar.asc
-  telegram-auth-spring-boot-starter-0.1.1-javadoc.jar
-  telegram-auth-spring-boot-starter-0.1.1-javadoc.jar.asc
+  telegram-auth-spring-boot-starter-0.2.0.jar
+  telegram-auth-spring-boot-starter-0.2.0.jar.asc
+  telegram-auth-spring-boot-starter-0.2.0-sources.jar
+  telegram-auth-spring-boot-starter-0.2.0-sources.jar.asc
+  telegram-auth-spring-boot-starter-0.2.0-javadoc.jar
+  telegram-auth-spring-boot-starter-0.2.0-javadoc.jar.asc
 ```
 
 ---
