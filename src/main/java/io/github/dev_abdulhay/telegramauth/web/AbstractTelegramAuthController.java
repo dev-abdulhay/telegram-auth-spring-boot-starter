@@ -1,11 +1,11 @@
 package io.github.dev_abdulhay.telegramauth.web;
 
-import io.github.dev_abdulhay.telegramauth.config.TelegramAuthProperties;
-import io.github.dev_abdulhay.telegramauth.entity.MTelegramAuthSession;
-import io.github.dev_abdulhay.telegramauth.entity.MTelegramAuthSession.Status;
+import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
+import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession;
+import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession.Status;
+import io.github.dev_abdulhay.telegramauth.entity.BaseTelegramUser;
+import io.github.dev_abdulhay.telegramauth.service.AbstractSessionService;
 import io.github.dev_abdulhay.telegramauth.service.AuthEvent;
-import io.github.dev_abdulhay.telegramauth.service.AuthEventBus;
-import io.github.dev_abdulhay.telegramauth.service.SessionService;
 import io.github.dev_abdulhay.telegramauth.web.dto.CreateSessionRequest;
 import io.github.dev_abdulhay.telegramauth.web.dto.CreateSessionResponse;
 import io.github.dev_abdulhay.telegramauth.web.dto.SessionStatusResponse;
@@ -18,29 +18,28 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.context.request.async.DeferredResult;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
-@RestController
-@RequestMapping("${telegram.auth.base-path:/api/tg-auth}")
-public class TelegramAuthController {
+/**
+ * Default REST surface, generic over the host's user/session subtypes. NOT a
+ * bean itself — the host subclass adds {@code @RestController} and the routing
+ * {@code @RequestMapping(prefix)}. Spring picks up these inherited handler
+ * annotations. Override any method to change behaviour.
+ */
+public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser, S extends BaseAuthSession> {
 
-    private final SessionService sessionService;
-    private final AuthEventBus bus;
-    private final TelegramAuthProperties props;
+    protected final AbstractSessionService<U, S> sessionService;
+    protected final TelegramBotModule module;
 
-    public TelegramAuthController(SessionService sessionService,
-                                  AuthEventBus bus,
-                                  TelegramAuthProperties props) {
+    protected AbstractTelegramAuthController(AbstractSessionService<U, S> sessionService, TelegramBotModule module) {
         this.sessionService = sessionService;
-        this.bus = bus;
-        this.props = props;
+        this.module = module;
     }
 
     @PostMapping("/session")
@@ -48,68 +47,59 @@ public class TelegramAuthController {
                                         HttpServletRequest req) {
         String ip = clientIp(req);
         String ua = req.getHeader("User-Agent");
-        SessionService.CreatedSession created = sessionService.create(ip, ua);
-        String deepLink = "https://t.me/" + props.getBot().getUsername()
-                + "?start=" + created.rawToken();
+        AbstractSessionService.CreatedSession created = sessionService.create(ip, ua);
+        String deepLink = "https://t.me/" + module.getUsername() + "?start=" + created.rawToken();
         return new CreateSessionResponse(
-                created.rawToken(),
-                deepLink,
-                created.entity().getExpiresAt(),
-                List.of("POLL")
-        );
+                created.rawToken(), deepLink, created.entity().getExpiresAt(), List.of("POLL"));
     }
 
+    /**
+     * Long-polls for a terminal session status. The approval payload is delivered only on the
+     * active long-poll subscription that is open when the approval occurs; it is not persisted.
+     * A poll of an already-APPROVED session returns status {@code APPROVED} with an empty payload.
+     */
     @GetMapping("/session/{token}/poll")
     public DeferredResult<ResponseEntity<WaitResponse>> poll(@PathVariable String token) {
         String hash = sessionService.hash(token);
-        MTelegramAuthSession s = sessionService.findByRawToken(token).orElse(null);
-
+        S s = sessionService.findByRawToken(token).orElse(null);
         if (s == null) {
-            DeferredResult<ResponseEntity<WaitResponse>> r = new DeferredResult<>();
-            r.setResult(ResponseEntity.status(HttpStatus.GONE).build());
-            return r;
+            return immediate(ResponseEntity.status(HttpStatus.GONE).build());
         }
-
-        // Terminal — answer immediately and never subscribe.
         if (s.getStatus() == Status.APPROVED) {
-            return immediate(ResponseEntity.ok(new WaitResponse("APPROVED", java.util.Map.of())));
+            return immediate(ResponseEntity.ok(new WaitResponse("APPROVED", Map.of())));
         }
         if (s.getStatus() == Status.REJECTED) {
             return immediate(ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body(new WaitResponse("REJECTED", java.util.Map.of())));
+                    .body(new WaitResponse("REJECTED", Map.of())));
         }
-        if (s.getStatus() == Status.EXPIRED
-                || s.getExpiresAt().isBefore(OffsetDateTime.now())) {
+        if (s.getStatus() == Status.EXPIRED || s.getExpiresAt().isBefore(OffsetDateTime.now())) {
             return immediate(ResponseEntity.status(HttpStatus.GONE).build());
         }
 
         long remainingMs = Duration.between(OffsetDateTime.now(), s.getExpiresAt()).toMillis();
-        long timeoutMs = Math.min(props.getTransport().getPolling().getMaxWait().toMillis(),
-                                  Math.max(remainingMs, 0));
+        long timeoutMs = Math.min(module.getPollingTimeout().toMillis(), Math.max(remainingMs, 0));
 
         DeferredResult<ResponseEntity<WaitResponse>> result = new DeferredResult<>(timeoutMs);
-        // No body on timeout — 204 lets the client reopen.
         result.onTimeout(() -> result.setResult(ResponseEntity.noContent().build()));
 
         Consumer<AuthEvent> listener = ev -> {
             ResponseEntity<WaitResponse> resp = switch (ev.type()) {
                 case APPROVED -> ResponseEntity.ok(new WaitResponse("APPROVED", ev.payload()));
                 case REJECTED -> ResponseEntity.status(HttpStatus.FORBIDDEN)
-                        .body(new WaitResponse("REJECTED", java.util.Map.of()));
+                        .body(new WaitResponse("REJECTED", Map.of()));
                 case EXPIRED -> ResponseEntity.status(HttpStatus.GONE).build();
             };
             result.setResult(resp);
         };
-        bus.subscribe(hash, listener);
-        result.onCompletion(() -> bus.unsubscribe(hash, listener));
+        module.getBus().subscribe(hash, listener);
+        result.onCompletion(() -> module.getBus().unsubscribe(hash, listener));
         return result;
     }
 
     @GetMapping("/session/{token}/status")
     public ResponseEntity<SessionStatusResponse> status(@PathVariable String token) {
         return sessionService.findByRawToken(token)
-                .map(s -> ResponseEntity.ok(
-                        new SessionStatusResponse(s.getStatus().name(), s.getExpiresAt())))
+                .map(s -> ResponseEntity.ok(new SessionStatusResponse(s.getStatus().name(), s.getExpiresAt())))
                 .orElseGet(() -> ResponseEntity.status(HttpStatus.GONE).build());
     }
 

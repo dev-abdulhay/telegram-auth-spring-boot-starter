@@ -1,21 +1,23 @@
 package io.github.dev_abdulhay.telegramauth.entity;
 
 import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.Table;
+import jakarta.persistence.MappedSuperclass;
 
 import java.time.OffsetDateTime;
 
-@Entity
-@Table(name = "tg_auth_telegram_user")
-public class MTelegramUser {
+/**
+ * Base Telegram user. {@code @MappedSuperclass} — has no table of its own.
+ * Host apps subclass with {@code @Entity @Table(name = "...")} per user type.
+ */
+@MappedSuperclass
+public abstract class BaseTelegramUser {
 
-    public enum Status { PENDING_CONFIRM, ACTIVE, BLOCKED }
+    public enum Status { PENDING, ACTIVE, BLOCKED }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -41,7 +43,7 @@ public class MTelegramUser {
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", length = 30, nullable = false)
-    private Status status = Status.PENDING_CONFIRM;
+    private Status status = Status.PENDING;
 
     @Column(name = "external_user_id", length = 100)
     private String externalUserId;

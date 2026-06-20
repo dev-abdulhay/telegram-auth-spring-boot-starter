@@ -1,0 +1,4 @@
+<factorypath>
+    <factorypathentry kind="VARJAR" id="M2_REPO/org/springframework/boot/spring-boot-configuration-processor/3.3.5/spring-boot-configuration-processor-3.3.5.jar" enabled="true" runInBatchMode="false"/>
+    <factorypathentry kind="VARJAR" id="M2_REPO/org/springframework/boot/spring-boot-autoconfigure-processor/3.3.5/spring-boot-autoconfigure-processor-3.3.5.jar" enabled="true" runInBatchMode="false"/>
+</factorypath>
