@@ -7,6 +7,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.MappedSuperclass;
+import jakarta.persistence.PreUpdate;
 
 import java.time.OffsetDateTime;
 
@@ -48,6 +49,14 @@ public abstract class BaseAuthSession {
     @Column(name = "approved_at")
     private OffsetDateTime approvedAt;
 
+    @Column(name = "updated_at", nullable = false)
+    private OffsetDateTime updatedAt = OffsetDateTime.now();
+
+    @PreUpdate
+    void onUpdate() {
+        this.updatedAt = OffsetDateTime.now();
+    }
+
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
     public String getTokenHash() { return tokenHash; }
@@ -66,4 +75,6 @@ public abstract class BaseAuthSession {
     public void setExpiresAt(OffsetDateTime expiresAt) { this.expiresAt = expiresAt; }
     public OffsetDateTime getApprovedAt() { return approvedAt; }
     public void setApprovedAt(OffsetDateTime approvedAt) { this.approvedAt = approvedAt; }
+    public OffsetDateTime getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(OffsetDateTime updatedAt) { this.updatedAt = updatedAt; }
 }

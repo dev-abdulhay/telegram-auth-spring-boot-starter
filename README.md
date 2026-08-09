@@ -159,7 +159,6 @@ CREATE TABLE admin_tg_user (
     last_name        VARCHAR(100),
     username         VARCHAR(50),
     language_code    VARCHAR(5),
-    external_user_id VARCHAR(100),
     status           VARCHAR(30)  NOT NULL,
     created_at       TIMESTAMPTZ  NOT NULL,
     updated_at       TIMESTAMPTZ  NOT NULL
@@ -173,6 +172,7 @@ CREATE TABLE admin_tg_session (
     ip_address        VARCHAR(45),
     user_agent        VARCHAR(500),
     created_at        TIMESTAMPTZ  NOT NULL,
+    updated_at        TIMESTAMPTZ  NOT NULL,
     expires_at        TIMESTAMPTZ  NOT NULL,
     approved_at       TIMESTAMPTZ
 );

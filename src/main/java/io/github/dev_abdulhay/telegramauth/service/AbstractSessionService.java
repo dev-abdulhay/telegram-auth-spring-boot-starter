@@ -85,8 +85,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
         AuthContext ctx = new AuthContext(s.getIpAddress(), s.getUserAgent());
         TelegramUserInfo info = new TelegramUserInfo(
                 user.getTelegramId(), user.getPhone(), user.getFirstName(),
-                user.getLastName(), user.getUsername(), user.getLanguageCode(),
-                user.getExternalUserId());
+                user.getLastName(), user.getUsername(), user.getLanguageCode());
 
         AuthApproveResult result;
         try {

@@ -39,6 +39,20 @@ class JpaLayerTest {
     }
 
     @Test
+    void updatedAtRefreshesOnUpdate() {
+        DemoUser u = new DemoUser();
+        u.setTelegramId(77L);
+        u.setStatus(BaseTelegramUser.Status.PENDING);
+        u = users.saveAndFlush(u);
+        OffsetDateTime before = u.getUpdatedAt();
+
+        u.setFirstName("Vali");
+        DemoUser updated = users.saveAndFlush(u);
+
+        assertThat(updated.getUpdatedAt()).isAfter(before);
+    }
+
+    @Test
     void sessionFindsByTokenHashAndByExpiry() {
         DemoSession s = new DemoSession();
         s.setTokenHash("hash-1");
@@ -50,5 +64,20 @@ class JpaLayerTest {
         List<DemoSession> overdue = sessions.findByStatusAndExpiresAtBefore(
                 BaseAuthSession.Status.PENDING, OffsetDateTime.now());
         assertThat(overdue).hasSize(1);
+    }
+
+    @Test
+    void sessionUpdatedAtRefreshesOnUpdate() {
+        DemoSession s = new DemoSession();
+        s.setTokenHash("hash-2");
+        s.setStatus(BaseAuthSession.Status.PENDING);
+        s.setExpiresAt(OffsetDateTime.now().plusMinutes(3));
+        s = sessions.saveAndFlush(s);
+        OffsetDateTime before = s.getUpdatedAt();
+
+        s.setStatus(BaseAuthSession.Status.APPROVED);
+        DemoSession updated = sessions.saveAndFlush(s);
+
+        assertThat(updated.getUpdatedAt()).isAfter(before);
     }
 }
