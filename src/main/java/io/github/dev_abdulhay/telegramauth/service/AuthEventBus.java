@@ -4,8 +4,8 @@ import java.util.function.Consumer;
 
 /**
  * Internal pub/sub used by wait endpoints. Listener is invoked at most once
- * (terminal events only). Implementations: {@link InMemoryAuthEventBus} for
- * single-instance deployments; a Redis-backed variant is on the roadmap.
+ * (terminal events only). The only implementation is
+ * {@link InMemoryAuthEventBus}, for single-instance deployments.
  */
 public interface AuthEventBus {
 
