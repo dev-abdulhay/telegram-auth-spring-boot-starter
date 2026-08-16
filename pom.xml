@@ -7,7 +7,7 @@
 
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.4.0</version>
     <packaging>jar</packaging>
 
     <name>telegram-auth-spring-boot-starter</name>
