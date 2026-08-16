@@ -59,4 +59,33 @@ class ControllerFlowTest {
     void statusOfMissingTokenIsGone() throws Exception {
         mvc.perform(get("/api/demo-auth/session/{t}/status", "nope")).andExpect(status().isGone());
     }
+
+    @Test
+    void forwardedForUsesTheProxyAppendedEntryNotTheClientSuppliedOne() throws Exception {
+        MvcResult createRes = mvc.perform(post("/api/demo-auth/session")
+                        .header("X-Forwarded-For", "6.6.6.6, 10.0.0.9"))
+                .andExpect(status().isOk()).andReturn();
+        String token = json.readTree(createRes.getResponse().getContentAsString()).get("token").asText();
+
+        // "6.6.6.6" is whatever the caller wrote; only the trailing entry came from the proxy
+        assertThat(sessionService.findByRawToken(token).orElseThrow().getIpAddress()).isEqualTo("10.0.0.9");
+    }
+
+    @Test
+    void pollAfterApprovalReturnsPersistedPayload() throws Exception {
+        MvcResult createRes = mvc.perform(post("/api/demo-auth/session"))
+                .andExpect(status().isOk()).andReturn();
+        String token = json.readTree(createRes.getResponse().getContentAsString()).get("token").asText();
+
+        DemoUser u = new DemoUser();
+        u.setTelegramId(321L);
+        sessionService.approve(sessionService.hash(token), u);
+
+        // no live subscription was open during approval — payload must come from the DB
+        MvcResult async = mvc.perform(get("/api/demo-auth/session/{t}/poll", token)).andReturn();
+        MvcResult done = mvc.perform(asyncDispatch(async)).andExpect(status().isOk()).andReturn();
+        JsonNode wait = json.readTree(done.getResponse().getContentAsString());
+        assertThat(wait.get("status").asText()).isEqualTo("APPROVED");
+        assertThat(wait.get("payload").get("tgId").asLong()).isEqualTo(321L);
+    }
 }

@@ -19,6 +19,8 @@ public final class FlowMessages {
         CONTACT_SAVED,
         CONTACT_SKIPPED,
         CONFIRM_PROMPT,
+        /** Format string with two {@code %s} slots: session IP, then device/user-agent. */
+        CONFIRM_DETAILS,
         BTN_APPROVE,
         BTN_REJECT,
         APPROVED,
@@ -59,6 +61,10 @@ public final class FlowMessages {
                     "uz", "Saytga kirishni tasdiqlaysizmi?",
                     "ru", "Подтвердить вход на сайт?",
                     "en", "Confirm sign-in to the website?")),
+            Map.entry(Key.CONFIRM_DETAILS, Map.of(
+                    "uz", "IP: %s\nQurilma: %s",
+                    "ru", "IP: %s\nУстройство: %s",
+                    "en", "IP: %s\nDevice: %s")),
             Map.entry(Key.BTN_APPROVE, Map.of(
                     "uz", "✅ Tasdiqlash",
                     "ru", "✅ Подтвердить",

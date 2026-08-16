@@ -25,10 +25,27 @@ public class StubSessionRepo implements DemoSessionRepository {
     @Override public Optional<DemoSession> findByTokenHash(String tokenHash) {
         return store.values().stream().filter(s -> tokenHash.equals(s.getTokenHash())).findFirst();
     }
+    @Override public Optional<DemoSession> findWithLockByTokenHash(String tokenHash) {
+        return findByTokenHash(tokenHash);
+    }
     @Override public List<DemoSession> findByStatusAndExpiresAtBefore(BaseAuthSession.Status status, OffsetDateTime time) {
         return store.values().stream()
                 .filter(s -> s.getStatus() == status && s.getExpiresAt() != null && s.getExpiresAt().isBefore(time))
                 .toList();
+    }
+    @Override public long countByIpAddressAndStatusAndExpiresAtAfter(String ipAddress, BaseAuthSession.Status status, OffsetDateTime time) {
+        return store.values().stream()
+                .filter(s -> ipAddress.equals(s.getIpAddress()) && s.getStatus() == status
+                        && s.getExpiresAt() != null && s.getExpiresAt().isAfter(time))
+                .count();
+    }
+    @Override public int deleteByStatusInAndExpiresAtBefore(java.util.Collection<BaseAuthSession.Status> statuses, OffsetDateTime time) {
+        List<Long> ids = store.values().stream()
+                .filter(s -> statuses.contains(s.getStatus()) && s.getExpiresAt() != null && s.getExpiresAt().isBefore(time))
+                .map(DemoSession::getId)
+                .toList();
+        ids.forEach(store::remove);
+        return ids.size();
     }
     @Override public <Sx extends DemoSession> Sx save(Sx entity) {
         if (entity.getId() == null) entity.setId(seq.incrementAndGet());

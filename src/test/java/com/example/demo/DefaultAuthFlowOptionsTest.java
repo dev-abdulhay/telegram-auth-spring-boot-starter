@@ -61,9 +61,14 @@ class DefaultAuthFlowOptionsTest {
     }
 
     private static JsonNode start(long userId, String raw, String lang) throws Exception {
+        return startIn(userId, userId, raw, lang);
+    }
+
+    /** {@code chatId != userId} models a group/supergroup, where the deep link must be ignored. */
+    private static JsonNode startIn(long chatId, long userId, String raw, String lang) throws Exception {
         return M.readTree(M.writeValueAsString(Map.of("message", Map.of(
                 "text", "/start " + raw,
-                "chat", Map.of("id", userId),
+                "chat", Map.of("id", chatId),
                 "from", Map.of("id", userId, "first_name", "Ali", "language_code", lang)))));
     }
 
@@ -82,11 +87,16 @@ class DefaultAuthFlowOptionsTest {
     }
 
     private static JsonNode callback(long userId, String data, String lang) throws Exception {
+        return callbackIn(userId, userId, data, lang);
+    }
+
+    /** {@code chatId != userId} models a button tapped in a group chat. */
+    private static JsonNode callbackIn(long chatId, long userId, String data, String lang) throws Exception {
         return M.readTree(M.writeValueAsString(Map.of("callback_query", Map.of(
                 "id", "cb1",
                 "data", data,
                 "from", Map.of("id", userId, "language_code", lang),
-                "message", Map.of("chat", Map.of("id", userId), "message_id", 42)))));
+                "message", Map.of("chat", Map.of("id", chatId), "message_id", 42)))));
     }
 
     // --- requireApproval ---
@@ -99,14 +109,102 @@ class DefaultAuthFlowOptionsTest {
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
 
         assertThat(((BaseAuthSession) created.entity()).getStatus()).isEqualTo(BaseAuthSession.Status.PENDING);
-        assertThat(e.bot().last().text()).isEqualTo("Saytga kirishni tasdiqlaysizmi?");
+        assertThat(e.bot().last().text()).startsWith("Saytga kirishni tasdiqlaysizmi?");
         assertThat(e.bot().last().markup()).contains("tgauth:approve:" + created.rawToken());
+        // the account is not created until the user actually confirms
+        assertThat(e.users().findByTelegramId(555L)).isEmpty();
 
         e.module().getCallbackHandler().accept(callback(555L, "tgauth:approve:" + created.rawToken(), "uz"));
 
         assertThat(((BaseAuthSession) created.entity()).getStatus()).isEqualTo(BaseAuthSession.Status.APPROVED);
+        assertThat(e.users().findByTelegramId(555L)).isPresent();
         assertThat(e.bot().edited).hasSize(1);
         assertThat(e.bot().edited.get(0)).contains("Tasdiqlandi");
+    }
+
+    @Test
+    void confirmPromptShowsSessionIpAndDevice() throws Exception {
+        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        var created = e.sessions().create("203.0.113.7", "Mozilla/5.0 (Macintosh) Safari/605");
+
+        e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
+
+        assertThat(e.bot().last().text())
+                .contains("IP: 203.0.113.7")
+                .contains("Qurilma: Mozilla/5.0 (Macintosh) Safari/605");
+    }
+
+    @Test
+    void rejectLeavesNoAccountBehind() throws Exception {
+        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        var created = e.sessions().create("ip", "ua");
+
+        e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
+        e.module().getCallbackHandler().accept(callback(555L, "tgauth:reject:" + created.rawToken(), "uz"));
+
+        assertThat(((BaseAuthSession) created.entity()).getStatus()).isEqualTo(BaseAuthSession.Status.REJECTED);
+        assertThat(e.users().findByTelegramId(555L)).isEmpty();
+    }
+
+    // --- private-chat guard ---
+
+    @Test
+    void startInGroupChatIsIgnored() throws Exception {
+        Env e = env(DefaultAuthFlow.Options.defaults());
+        var created = e.sessions().create("ip", "ua");
+
+        // deep link pasted into a group: chat.id is the group, not the user
+        e.module().getCommands().get("/start").accept(startIn(-100200L, 555L, created.rawToken(), "uz"));
+
+        assertThat(e.bot().sent).isEmpty();
+        assertThat(((BaseAuthSession) created.entity()).getStatus()).isEqualTo(BaseAuthSession.Status.PENDING);
+        assertThat(e.users().findByTelegramId(-100200L)).isEmpty();
+        assertThat(e.users().findByTelegramId(555L)).isEmpty();
+    }
+
+    @Test
+    void callbackFromAnotherChatIsRefused() throws Exception {
+        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        var created = e.sessions().create("ip", "ua");
+        e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
+
+        // a bystander taps ✅ on a button that is not in their own private chat
+        e.module().getCallbackHandler()
+                .accept(callbackIn(-100200L, 777L, "tgauth:approve:" + created.rawToken(), "uz"));
+
+        assertThat(((BaseAuthSession) created.entity()).getStatus()).isEqualTo(BaseAuthSession.Status.PENDING);
+        assertThat(e.bot().answered).containsExactly("Kirish taqiqlangan.");
+        assertThat(e.bot().edited).isEmpty();
+    }
+
+    // --- co-existing with host handlers ---
+
+    @Test
+    void foreignCallbackAndOrphanContactGoToTheHostFallback() throws Exception {
+        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).requireContact(true).build());
+        List<String> fallback = new ArrayList<>();
+        e.module().fallback(u -> fallback.add(u.has("callback_query") ? "cb" : "msg"));
+
+        e.module().getCallbackHandler().accept(callback(555L, "shop:buy:42", "uz"));
+        e.module().getContactHandler().accept(contact(555L, 555L, "+998901234567"));
+
+        assertThat(fallback).containsExactly("cb", "msg");
+    }
+
+    @Test
+    void oversizedTokenFailsFastInsteadOfSilentlyBreakingTheKeyboard() throws Exception {
+        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        DemoSession s = new DemoSession();
+        String longToken = "t".repeat(60);
+        s.setTokenHash(new TokenGenerator().hash(longToken));
+        s.setStatus(BaseAuthSession.Status.PENDING);
+        s.setCreatedAt(OffsetDateTime.now());
+        s.setExpiresAt(OffsetDateTime.now().plusMinutes(3));
+        e.sessionRepo().save(s);
+
+        assertThatThrownBy(() -> e.module().getCommands().get("/start").accept(start(555L, longToken, "uz")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Telegram allows 64");
     }
 
     @Test
@@ -257,6 +355,24 @@ class DefaultAuthFlowOptionsTest {
                 .isInstanceOf(SessionRateLimitException.class);
         // other IPs unaffected
         sessions.create("8.8.8.8", "ua");
+    }
+
+    @Test
+    void overduePendingSessionsDoNotHoldTheIpLimit() {
+        RecordingBot bot = new RecordingBot();
+        TelegramBotModule module = TelegramBotModule.builder("123:ABC", "demo_bot")
+                .bot(bot)
+                .maxPendingPerIp(1)
+                .build();
+        DemoSessionService sessions = new DemoSessionService(new StubSessionRepo(), new TokenGenerator(), module);
+
+        var first = sessions.create("9.9.9.9", "ua");
+        assertThatThrownBy(() -> sessions.create("9.9.9.9", "ua"))
+                .isInstanceOf(SessionRateLimitException.class);
+
+        // still PENDING because the sweeper has not run yet — an overdue row must not lock the IP out
+        ((BaseAuthSession) first.entity()).setExpiresAt(OffsetDateTime.now().minusMinutes(1));
+        sessions.create("9.9.9.9", "ua");
     }
 
     @Test
