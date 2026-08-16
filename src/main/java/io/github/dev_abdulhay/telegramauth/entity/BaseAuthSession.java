@@ -31,7 +31,12 @@ import java.time.OffsetDateTime;
 @MappedSuperclass
 public abstract class BaseAuthSession {
 
-    public enum Status { PENDING, APPROVED, REJECTED, EXPIRED }
+    /**
+     * {@code AWAITING_CODE} is <b>not</b> terminal: the user confirmed the login
+     * but still owes the browser-visible confirmation code. It holds its per-IP
+     * rate-limit slot and is swept to {@code EXPIRED} just like {@code PENDING}.
+     */
+    public enum Status { PENDING, AWAITING_CODE, APPROVED, REJECTED, EXPIRED }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

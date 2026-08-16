@@ -24,6 +24,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.context.request.async.DeferredResult;
 
 import java.time.Duration;
@@ -63,22 +64,36 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
     }
 
     /**
-     * Long-polls for a terminal session status. The approval payload is
-     * delivered on the live subscription when possible, and is also persisted
-     * on the session row, so a poll of an already-APPROVED session returns the
-     * stored payload. The bus subscription is registered <em>before</em> the
-     * final status check, so a transition landing in between is never missed.
+     * Long-polls for the next session state the caller has not seen yet. The
+     * approval payload is delivered on the live subscription when possible, and
+     * is also persisted on the session row, so a poll of an already-APPROVED
+     * session returns the stored payload. The bus subscription is registered
+     * <em>before</em> the final status check, so a transition landing in between
+     * is never missed.
+     *
+     * <p>{@code since} names the state the client already knows:
+     * <ul>
+     *   <li>omitted — the pre-0.4.0 contract: only terminal states are returned,
+     *       and an {@code AWAITING_CODE} transition arriving mid-poll is answered
+     *       with {@code 204} so the client simply polls again;</li>
+     *   <li>{@code PENDING} — opts into the confirmation-code step and yields
+     *       {@code 202} plus the browser-visible {@code confirmCode};</li>
+     *   <li>{@code AWAITING_CODE} — waits for a terminal state. This is what stops
+     *       a client from busy-looping on the state it is already in.</li>
+     * </ul>
      */
     @GetMapping("/session/{token}/poll")
-    public DeferredResult<ResponseEntity<WaitResponse>> poll(@PathVariable String token) {
+    public DeferredResult<ResponseEntity<WaitResponse>> poll(@PathVariable String token,
+                                                             @RequestParam(required = false) String since) {
         String hash = sessionService.hash(token);
+        boolean wantsCode = "PENDING".equalsIgnoreCase(since);
         S s = sessionService.findByRawToken(token).orElse(null);
         if (s == null) {
             return immediate(ResponseEntity.status(HttpStatus.GONE).build());
         }
-        ResponseEntity<WaitResponse> terminal = terminalResponse(s);
-        if (terminal != null) {
-            return immediate(terminal);
+        ResponseEntity<WaitResponse> ready = immediateResponse(s, hash, wantsCode);
+        if (ready != null) {
+            return immediate(ready);
         }
 
         long remainingMs = Duration.between(OffsetDateTime.now(), s.getExpiresAt()).toMillis();
@@ -93,23 +108,26 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
                 case REJECTED -> ResponseEntity.status(HttpStatus.FORBIDDEN)
                         .body(new WaitResponse("REJECTED", Map.of()));
                 case EXPIRED -> ResponseEntity.status(HttpStatus.GONE).build();
+                // a client that did not ask for the code step gets the same answer
+                // as a timeout, so it re-polls instead of hanging for nothing
+                case AWAITING_CODE -> wantsCode ? awaitingCodeResponse(hash) : ResponseEntity.noContent().build();
             };
             result.setResult(resp);
         };
         module.getBus().subscribe(hash, listener);
         result.onCompletion(() -> module.getBus().unsubscribe(hash, listener));
 
-        // Re-check AFTER subscribing: a terminal transition that landed between
-        // the first read and the subscription is caught here from the DB.
+        // Re-check AFTER subscribing: a transition that landed between the first
+        // read and the subscription is caught here from the DB.
         S fresh = sessionService.findByRawToken(token).orElse(null);
-        ResponseEntity<WaitResponse> lateTerminal;
+        ResponseEntity<WaitResponse> late;
         if (fresh == null) {
-            lateTerminal = ResponseEntity.status(HttpStatus.GONE).build();
+            late = ResponseEntity.status(HttpStatus.GONE).build();
         } else {
-            lateTerminal = terminalResponse(fresh);
+            late = immediateResponse(fresh, hash, wantsCode);
         }
-        if (lateTerminal != null) {
-            result.setResult(lateTerminal);
+        if (late != null) {
+            result.setResult(late);
         }
         return result;
     }
@@ -124,7 +142,7 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
     @DeleteMapping("/session/{token}")
     public ResponseEntity<Void> cancel(@PathVariable String token) {
         sessionService.findByRawToken(token).ifPresent(s -> {
-            if (s.getStatus() == Status.PENDING) {
+            if (s.getStatus() == Status.PENDING || s.getStatus() == Status.AWAITING_CODE) {
                 sessionService.reject(s.getTokenHash());
             }
         });
@@ -136,8 +154,8 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
     }
 
-    /** Terminal response for the session's current state, or {@code null} while PENDING. */
-    private ResponseEntity<WaitResponse> terminalResponse(S s) {
+    /** Response for a state the caller has not seen yet, or {@code null} to keep waiting. */
+    private ResponseEntity<WaitResponse> immediateResponse(S s, String hash, boolean wantsCode) {
         if (s.getStatus() == Status.APPROVED) {
             return ResponseEntity.ok(new WaitResponse("APPROVED", readPayload(s)));
         }
@@ -145,10 +163,19 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(new WaitResponse("REJECTED", Map.of()));
         }
+        // checked before AWAITING_CODE so an overdue half-finished login reads as gone
         if (s.getStatus() == Status.EXPIRED || s.getExpiresAt().isBefore(OffsetDateTime.now())) {
             return ResponseEntity.status(HttpStatus.GONE).build();
         }
+        if (s.getStatus() == Status.AWAITING_CODE && wantsCode) {
+            return awaitingCodeResponse(hash);
+        }
         return null;
+    }
+
+    private ResponseEntity<WaitResponse> awaitingCodeResponse(String hash) {
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(new WaitResponse(
+                "AWAITING_CODE", Map.of(), module.getConfirmCodeGenerator().codeFor(hash)));
     }
 
     private Map<String, Object> readPayload(S s) {
