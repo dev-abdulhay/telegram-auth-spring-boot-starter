@@ -376,6 +376,43 @@ class DefaultAuthFlowOptionsTest {
     }
 
     @Test
+    void awaitingCodeSessionsCountTowardTheIpLimit() {
+        RecordingBot bot = new RecordingBot();
+        TelegramBotModule module = TelegramBotModule.builder("123:ABC", "demo_bot")
+                .bot(bot)
+                .maxPendingPerIp(1)
+                .build();
+        DemoSessionService sessions = new DemoSessionService(new StubSessionRepo(), new TokenGenerator(), module);
+
+        var first = sessions.create("9.9.9.9", "ua");
+        ((BaseAuthSession) first.entity()).setStatus(BaseAuthSession.Status.AWAITING_CODE);
+
+        // half-finished logins must still hold their slot, else the limit is trivially bypassed
+        assertThatThrownBy(() -> sessions.create("9.9.9.9", "ua"))
+                .isInstanceOf(SessionRateLimitException.class);
+    }
+
+    @Test
+    void sweepExpiresOverdueAwaitingCodeSessions() {
+        RecordingBot bot = new RecordingBot();
+        TelegramBotModule module = TelegramBotModule.builder("123:ABC", "demo_bot").bot(bot).build();
+        StubSessionRepo repo = new StubSessionRepo();
+        DemoSessionService sessions = new DemoSessionService(repo, new TokenGenerator(), module);
+
+        DemoSession stuck = new DemoSession();
+        stuck.setTokenHash("h-awaiting");
+        stuck.setStatus(BaseAuthSession.Status.AWAITING_CODE);
+        stuck.setCreatedAt(OffsetDateTime.now().minusMinutes(10));
+        stuck.setExpiresAt(OffsetDateTime.now().minusMinutes(5));
+        repo.save(stuck);
+
+        sessions.sweepExpired();
+
+        assertThat(repo.findByTokenHash("h-awaiting").orElseThrow().getStatus())
+                .isEqualTo(BaseAuthSession.Status.EXPIRED);
+    }
+
+    @Test
     void sweepDeletesOldTerminalSessionsAndKeepsRecentOnes() {
         RecordingBot bot = new RecordingBot();
         TelegramBotModule module = TelegramBotModule.builder("123:ABC", "demo_bot")

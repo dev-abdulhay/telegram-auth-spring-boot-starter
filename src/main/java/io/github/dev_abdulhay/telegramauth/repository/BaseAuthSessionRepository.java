@@ -29,10 +29,18 @@ public interface BaseAuthSessionRepository<S extends BaseAuthSession>
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<S> findWithLockByTokenHash(String tokenHash);
 
-    List<S> findByStatusAndExpiresAtBefore(BaseAuthSession.Status status, OffsetDateTime time);
+    /** Sessions in any of the given statuses whose deadline has passed. */
+    List<S> findByStatusInAndExpiresAtBefore(Collection<BaseAuthSession.Status> statuses, OffsetDateTime time);
 
-    /** Live pending sessions for an IP; overdue rows are excluded so a stale batch cannot lock the IP out. */
-    long countByIpAddressAndStatusAndExpiresAtAfter(String ipAddress, BaseAuthSession.Status status, OffsetDateTime time);
+    /**
+     * Live sessions for an IP in any of the given statuses; overdue rows are excluded so a
+     * stale batch cannot lock the IP out. Both {@code PENDING} and {@code AWAITING_CODE}
+     * count — a half-finished login still occupies a slot, and counting only {@code PENDING}
+     * would let an attacker park sessions at the code step to bypass the limit.
+     */
+    long countByIpAddressAndStatusInAndExpiresAtAfter(String ipAddress,
+                                                      Collection<BaseAuthSession.Status> statuses,
+                                                      OffsetDateTime time);
 
     /**
      * Bulk-deletes old terminal sessions in one statement. A derived

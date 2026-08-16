@@ -36,6 +36,14 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
     private static final Logger log = LoggerFactory.getLogger(AbstractSessionService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final List<Status> TERMINAL_STATUSES = List.of(Status.APPROVED, Status.REJECTED, Status.EXPIRED);
+    /**
+     * Statuses a login can still be completed from. {@code TERMINAL_STATUSES} is
+     * deliberately <b>not</b> extended with {@code AWAITING_CODE}: it drives the
+     * retention purge, and a live session must never be deleted. The sweeper moves
+     * overdue {@code AWAITING_CODE} rows to {@code EXPIRED} first, and the purge
+     * picks them up from there.
+     */
+    protected static final List<Status> LIVE_STATUSES = List.of(Status.PENDING, Status.AWAITING_CODE);
     /** Matches the {@code approve_payload} column length on {@code BaseAuthSession}. */
     private static final int MAX_PAYLOAD_CHARS = 4000;
 
@@ -64,7 +72,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
      * bucket filter) in front if you need an exact ceiling.
      *
      * @throws SessionRateLimitException when the IP already holds
-     *         {@code maxPendingPerIp} live (PENDING, not yet expired) sessions
+     *         {@code maxPendingPerIp} live (PENDING or AWAITING_CODE, not yet expired) sessions
      *         (0 disables the check). Overdue sessions are ignored so a caller
      *         is never blocked while waiting for the sweeper to run.
      */
@@ -72,8 +80,8 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
     public CreatedSession create(String ipAddress, String userAgent) {
         int limit = module.getMaxPendingPerIp();
         if (limit > 0 && ipAddress != null && !ipAddress.isBlank()
-                && sessionRepo.countByIpAddressAndStatusAndExpiresAtAfter(
-                        ipAddress, Status.PENDING, OffsetDateTime.now()) >= limit) {
+                && sessionRepo.countByIpAddressAndStatusInAndExpiresAtAfter(
+                        ipAddress, LIVE_STATUSES, OffsetDateTime.now()) >= limit) {
             throw new SessionRateLimitException(ipAddress);
         }
         String raw = tokenGenerator.newToken();
@@ -102,14 +110,18 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
      * transition so concurrent approve/reject calls serialize instead of
      * double-firing the host handler.
      *
+     * <p>Accepts both {@code PENDING} and {@code AWAITING_CODE}. Ordering the
+     * confirmation steps is the flow's job, not this layer's: a host calling
+     * {@code approve} directly bypasses the confirmation-code step by design.
+     *
      * @return {@code true} if the session was approved; {@code false} if it was
      *         missing, already terminal, or expired
      */
     @Transactional
     public boolean approve(String tokenHash, U user) {
         S s = sessionRepo.findWithLockByTokenHash(tokenHash).orElse(null);
-        if (s == null || s.getStatus() != Status.PENDING) {
-            log.debug("approve: session not found or not pending");
+        if (s == null || !LIVE_STATUSES.contains(s.getStatus())) {
+            log.debug("approve: session not found or no longer live");
             return false;
         }
         if (s.getExpiresAt().isBefore(OffsetDateTime.now())) {
@@ -141,11 +153,41 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
         return true;
     }
 
-    /** @return {@code true} if a PENDING session was rejected. */
+    /**
+     * Moves a PENDING, non-expired session to {@code AWAITING_CODE}: the user
+     * confirmed the login but still owes the browser-visible confirmation code.
+     *
+     * <p>The host {@code approveHandler} is deliberately <b>not</b> called here —
+     * it fires once, at {@link #approve(String, BaseTelegramUser)}, so a login
+     * that dies at the code step leaves no account and no side effect behind.
+     *
+     * @return {@code true} if the session moved; {@code false} if it was missing,
+     *         already past PENDING, or expired
+     */
+    @Transactional
+    public boolean awaitCode(String tokenHash) {
+        S s = sessionRepo.findWithLockByTokenHash(tokenHash).orElse(null);
+        if (s == null || s.getStatus() != Status.PENDING) {
+            log.debug("awaitCode: session not found or not pending");
+            return false;
+        }
+        if (s.getExpiresAt().isBefore(OffsetDateTime.now())) {
+            s.setStatus(Status.EXPIRED);
+            sessionRepo.save(s);
+            publishAfterCommit(tokenHash, AuthEvent.expired());
+            return false;
+        }
+        s.setStatus(Status.AWAITING_CODE);
+        sessionRepo.save(s);
+        publishAfterCommit(tokenHash, AuthEvent.awaitingCode());
+        return true;
+    }
+
+    /** @return {@code true} if a live (PENDING or AWAITING_CODE) session was rejected. */
     @Transactional
     public boolean reject(String tokenHash) {
         S s = sessionRepo.findWithLockByTokenHash(tokenHash).orElse(null);
-        if (s == null || s.getStatus() != Status.PENDING) return false;
+        if (s == null || !LIVE_STATUSES.contains(s.getStatus())) return false;
         s.setStatus(Status.REJECTED);
         sessionRepo.save(s);
         publishAfterCommit(tokenHash, AuthEvent.rejected());
@@ -153,7 +195,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
     }
 
     /**
-     * Marks overdue PENDING sessions as EXPIRED and deletes terminal sessions
+     * Marks overdue live (PENDING / AWAITING_CODE) sessions as EXPIRED and deletes terminal sessions
      * older than the module's {@code sessionRetention} (ZERO disables deletion).
      * This method is {@code @Scheduled}, so every concrete subclass bean becomes
      * its own scheduled sweeper, all sharing the global
@@ -163,7 +205,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
     @Scheduled(cron = "${telegram.auth.cleanup-cron:0 */5 * * * *}")
     @Transactional
     public void sweepExpired() {
-        List<S> overdue = sessionRepo.findByStatusAndExpiresAtBefore(Status.PENDING, OffsetDateTime.now());
+        List<S> overdue = sessionRepo.findByStatusInAndExpiresAtBefore(LIVE_STATUSES, OffsetDateTime.now());
         if (!overdue.isEmpty()) {
             overdue.forEach(s -> s.setStatus(Status.EXPIRED));
             sessionRepo.saveAll(overdue);

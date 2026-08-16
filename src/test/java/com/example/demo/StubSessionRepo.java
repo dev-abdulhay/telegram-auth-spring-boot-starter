@@ -28,14 +28,17 @@ public class StubSessionRepo implements DemoSessionRepository {
     @Override public Optional<DemoSession> findWithLockByTokenHash(String tokenHash) {
         return findByTokenHash(tokenHash);
     }
-    @Override public List<DemoSession> findByStatusAndExpiresAtBefore(BaseAuthSession.Status status, OffsetDateTime time) {
+    @Override public List<DemoSession> findByStatusInAndExpiresAtBefore(
+            java.util.Collection<BaseAuthSession.Status> statuses, OffsetDateTime time) {
         return store.values().stream()
-                .filter(s -> s.getStatus() == status && s.getExpiresAt() != null && s.getExpiresAt().isBefore(time))
+                .filter(s -> statuses.contains(s.getStatus())
+                        && s.getExpiresAt() != null && s.getExpiresAt().isBefore(time))
                 .toList();
     }
-    @Override public long countByIpAddressAndStatusAndExpiresAtAfter(String ipAddress, BaseAuthSession.Status status, OffsetDateTime time) {
+    @Override public long countByIpAddressAndStatusInAndExpiresAtAfter(
+            String ipAddress, java.util.Collection<BaseAuthSession.Status> statuses, OffsetDateTime time) {
         return store.values().stream()
-                .filter(s -> ipAddress.equals(s.getIpAddress()) && s.getStatus() == status
+                .filter(s -> ipAddress.equals(s.getIpAddress()) && statuses.contains(s.getStatus())
                         && s.getExpiresAt() != null && s.getExpiresAt().isAfter(time))
                 .count();
     }

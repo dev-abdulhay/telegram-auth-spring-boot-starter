@@ -11,6 +11,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
@@ -58,6 +59,112 @@ class ControllerFlowTest {
     @Test
     void statusOfMissingTokenIsGone() throws Exception {
         mvc.perform(get("/api/demo-auth/session/{t}/status", "nope")).andExpect(status().isGone());
+    }
+
+    private String newSessionToken() throws Exception {
+        MvcResult res = mvc.perform(post("/api/demo-auth/session")).andExpect(status().isOk()).andReturn();
+        return json.readTree(res.getResponse().getContentAsString()).get("token").asText();
+    }
+
+    @Test
+    void pollWithSincePendingReturnsTheConfirmationCodeAlreadyAtTheCodeStage() throws Exception {
+        String token = newSessionToken();
+        String hash = sessionService.hash(token);
+        sessionService.awaitCode(hash);
+
+        MvcResult async = mvc.perform(get("/api/demo-auth/session/{t}/poll", token)
+                .param("since", "PENDING")).andReturn();
+        MvcResult done = mvc.perform(asyncDispatch(async)).andExpect(status().isAccepted()).andReturn();
+
+        JsonNode body = json.readTree(done.getResponse().getContentAsString());
+        assertThat(body.get("status").asText()).isEqualTo("AWAITING_CODE");
+        assertThat(body.get("confirmCode").asInt())
+                .isEqualTo(io.github.dev_abdulhay.telegramauth.security.ConfirmCode.of(hash));
+    }
+
+    @Test
+    void pollWithSincePendingAlsoDeliversTheCodeOnTheLiveEvent() throws Exception {
+        String token = newSessionToken();
+        String hash = sessionService.hash(token);
+
+        // subscribed while still PENDING, so the code must arrive through the bus
+        MvcResult async = mvc.perform(get("/api/demo-auth/session/{t}/poll", token)
+                .param("since", "PENDING")).andReturn();
+        sessionService.awaitCode(hash);
+
+        MvcResult done = mvc.perform(asyncDispatch(async)).andExpect(status().isAccepted()).andReturn();
+        JsonNode body = json.readTree(done.getResponse().getContentAsString());
+        assertThat(body.get("confirmCode").asInt())
+                .isEqualTo(io.github.dev_abdulhay.telegramauth.security.ConfirmCode.of(hash));
+    }
+
+    @Test
+    void pollWithoutSinceAnswersTheCodeTransitionWithNoContentSoTheClientRepolls() throws Exception {
+        String token = newSessionToken();
+
+        // a 0.3.0 client: subscribed while PENDING, never asked for the code step
+        MvcResult async = mvc.perform(get("/api/demo-auth/session/{t}/poll", token)).andReturn();
+        sessionService.awaitCode(sessionService.hash(token));
+
+        mvc.perform(asyncDispatch(async)).andExpect(status().isNoContent());
+    }
+
+    @Test
+    void pollWithoutSinceKeepsWaitingOnAnAlreadyAwaitingCodeSession() throws Exception {
+        String token = newSessionToken();
+        String hash = sessionService.hash(token);
+        sessionService.awaitCode(hash);
+
+        MvcResult async = mvc.perform(get("/api/demo-auth/session/{t}/poll", token)).andReturn();
+        DemoUser u = new DemoUser();
+        u.setTelegramId(11L);
+        sessionService.approve(hash, u);
+
+        // the half-finished state never short-circuits a 0.3.0 poll — only the terminal one does
+        MvcResult done = mvc.perform(asyncDispatch(async)).andExpect(status().isOk()).andReturn();
+        String body = done.getResponse().getContentAsString();
+        assertThat(json.readTree(body).get("status").asText()).isEqualTo("APPROVED");
+        assertThat(body).doesNotContain("confirmCode");
+    }
+
+    @Test
+    void pollWithSinceAwaitingCodeWaitsForATerminalStateInsteadOfBusyLooping() throws Exception {
+        String token = newSessionToken();
+        String hash = sessionService.hash(token);
+        sessionService.awaitCode(hash);
+
+        MvcResult async = mvc.perform(get("/api/demo-auth/session/{t}/poll", token)
+                .param("since", "AWAITING_CODE")).andReturn();
+        DemoUser u = new DemoUser();
+        u.setTelegramId(12L);
+        sessionService.approve(hash, u);
+
+        MvcResult done = mvc.perform(asyncDispatch(async)).andExpect(status().isOk()).andReturn();
+        assertThat(json.readTree(done.getResponse().getContentAsString()).get("status").asText())
+                .isEqualTo("APPROVED");
+    }
+
+    @Test
+    void statusReportsAwaitingCodeButNeverTheCode() throws Exception {
+        String token = newSessionToken();
+        sessionService.awaitCode(sessionService.hash(token));
+
+        MvcResult res = mvc.perform(get("/api/demo-auth/session/{t}/status", token))
+                .andExpect(status().isOk()).andReturn();
+        String body = res.getResponse().getContentAsString();
+        assertThat(json.readTree(body).get("status").asText()).isEqualTo("AWAITING_CODE");
+        assertThat(body).doesNotContain("confirmCode");
+    }
+
+    @Test
+    void cancelRejectsASessionStuckAtTheCodeStep() throws Exception {
+        String token = newSessionToken();
+        sessionService.awaitCode(sessionService.hash(token));
+
+        mvc.perform(delete("/api/demo-auth/session/{t}", token)).andExpect(status().isNoContent());
+
+        assertThat(sessionService.findByRawToken(token).orElseThrow().getStatus())
+                .isEqualTo(io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession.Status.REJECTED);
     }
 
     @Test

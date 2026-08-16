@@ -62,8 +62,9 @@ class JpaLayerTest {
         sessions.save(s);
 
         assertThat(sessions.findByTokenHash("hash-1")).isPresent();
-        List<DemoSession> overdue = sessions.findByStatusAndExpiresAtBefore(
-                BaseAuthSession.Status.PENDING, OffsetDateTime.now());
+        List<DemoSession> overdue = sessions.findByStatusInAndExpiresAtBefore(
+                List.of(BaseAuthSession.Status.PENDING, BaseAuthSession.Status.AWAITING_CODE),
+                OffsetDateTime.now());
         assertThat(overdue).hasSize(1);
     }
 
