@@ -26,6 +26,7 @@ public class DemoTgConfig {
         };
         return TelegramBotModule.builder("TEST", "demo_bot")
                 .bot(fakeBot)
+                .trustProxyHeaders(true)
                 .approveHandler((info, ctx) -> new AuthApproveResult(Map.of("tgId", info.telegramId())))
                 .build();
     }
