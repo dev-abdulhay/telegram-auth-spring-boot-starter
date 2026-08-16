@@ -7,6 +7,7 @@ import io.github.dev_abdulhay.telegramauth.bot.TelegramBot;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession;
 import io.github.dev_abdulhay.telegramauth.entity.BaseTelegramUser;
+import io.github.dev_abdulhay.telegramauth.flow.CodeConfirmation;
 import io.github.dev_abdulhay.telegramauth.flow.DefaultAuthFlow;
 import io.github.dev_abdulhay.telegramauth.security.TokenGenerator;
 import io.github.dev_abdulhay.telegramauth.service.SessionRateLimitException;
@@ -60,6 +61,14 @@ class DefaultAuthFlowOptionsTest {
         return new Env(bot, module, users, sessions, userRepo, sessionRepo);
     }
 
+    /**
+     * Pre-0.4.0 behaviour: the number-matching step off, so these tests keep
+     * asserting the flow as it was before the confirmation code existed.
+     */
+    private static DefaultAuthFlow.Options.Builder legacy() {
+        return DefaultAuthFlow.Options.builder().codeConfirmation(CodeConfirmation.OFF);
+    }
+
     private static JsonNode start(long userId, String raw, String lang) throws Exception {
         return startIn(userId, userId, raw, lang);
     }
@@ -99,11 +108,70 @@ class DefaultAuthFlowOptionsTest {
                 "message", Map.of("chat", Map.of("id", chatId), "message_id", 42)))));
     }
 
+    // --- options surface ---
+
+    @Test
+    void codeButtonsMustStayBetweenThreeAndTen() {
+        assertThatThrownBy(() -> DefaultAuthFlow.Options.builder().codeButtons(2).build())
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("codeButtons");
+        assertThatThrownBy(() -> DefaultAuthFlow.Options.builder().codeButtons(11).build())
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("codeButtons");
+        assertThat(DefaultAuthFlow.Options.builder().codeButtons(3).build().codeButtons()).isEqualTo(3);
+        assertThat(DefaultAuthFlow.Options.builder().codeButtons(10).build().codeButtons()).isEqualTo(10);
+    }
+
+    @Test
+    void codeConfirmationDefaultsToButtonAndAttemptsFollowTheMode() {
+        DefaultAuthFlow.Options d = DefaultAuthFlow.Options.defaults();
+        assertThat(d.codeConfirmation()).isEqualTo(CodeConfirmation.BUTTON);
+        assertThat(d.codeButtons()).isEqualTo(3);
+        assertThat(d.effectiveMaxCodeAttempts()).isEqualTo(1);
+        assertThat(d.codeCooldown()).isEqualTo(Duration.ofMinutes(5));
+        assertThat(d.codeCooldownMax()).isEqualTo(Duration.ofHours(1));
+        assertThat(d.codeCooldownThreshold()).isEqualTo(1);
+
+        assertThat(DefaultAuthFlow.Options.builder().codeConfirmation(CodeConfirmation.TYPED)
+                .build().effectiveMaxCodeAttempts()).isEqualTo(3);
+        // an explicit value always wins over the per-mode default
+        assertThat(DefaultAuthFlow.Options.builder().codeConfirmation(CodeConfirmation.TYPED)
+                .maxCodeAttempts(2).build().effectiveMaxCodeAttempts()).isEqualTo(2);
+    }
+
+    @Test
+    void cooldownSettingsAreValidated() {
+        assertThatThrownBy(() -> DefaultAuthFlow.Options.builder()
+                .codeCooldown(Duration.ofMinutes(10)).codeCooldownMax(Duration.ofMinutes(5)).build())
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("codeCooldownMax");
+        assertThatThrownBy(() -> DefaultAuthFlow.Options.builder().codeCooldownThreshold(0).build())
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("codeCooldownThreshold");
+        assertThatThrownBy(() -> DefaultAuthFlow.Options.builder().maxCodeAttempts(-1).build())
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("maxCodeAttempts");
+        assertThatThrownBy(() -> DefaultAuthFlow.Options.builder().codeConfirmation(null).build())
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("codeConfirmation");
+    }
+
+    @Test
+    void everyMessageKeyIsTranslatedIntoAllThreeLanguages() {
+        for (io.github.dev_abdulhay.telegramauth.flow.FlowMessages.Key key
+                : io.github.dev_abdulhay.telegramauth.flow.FlowMessages.Key.values()) {
+            for (String lang : List.of("uz", "ru", "en")) {
+                assertThat(io.github.dev_abdulhay.telegramauth.flow.FlowMessages.text(key, lang))
+                        .as("%s/%s", key, lang).isNotBlank();
+            }
+        }
+        assertThat(io.github.dev_abdulhay.telegramauth.flow.FlowMessages.text(
+                io.github.dev_abdulhay.telegramauth.flow.FlowMessages.Key.CODE_WRONG, "uz")).contains("%d");
+        assertThat(io.github.dev_abdulhay.telegramauth.flow.FlowMessages.text(
+                io.github.dev_abdulhay.telegramauth.flow.FlowMessages.Key.TOO_MANY_ATTEMPTS, "ru")).contains("%d");
+        assertThat(io.github.dev_abdulhay.telegramauth.flow.FlowMessages.text(
+                io.github.dev_abdulhay.telegramauth.flow.FlowMessages.Key.CONFIRM_WARNING, "en")).contains("❌");
+    }
+
     // --- requireApproval ---
 
     @Test
     void approvalFlowPromptsInsteadOfAutoApproving() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        Env e = env(legacy().requireApproval(true).build());
         var created = e.sessions().create("ip", "ua");
 
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
@@ -124,7 +192,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void confirmPromptShowsSessionIpAndDevice() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        Env e = env(legacy().requireApproval(true).build());
         var created = e.sessions().create("203.0.113.7", "Mozilla/5.0 (Macintosh) Safari/605");
 
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
@@ -136,7 +204,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void rejectLeavesNoAccountBehind() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        Env e = env(legacy().requireApproval(true).build());
         var created = e.sessions().create("ip", "ua");
 
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
@@ -150,7 +218,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void startInGroupChatIsIgnored() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.defaults());
+        Env e = env(legacy().build());
         var created = e.sessions().create("ip", "ua");
 
         // deep link pasted into a group: chat.id is the group, not the user
@@ -164,7 +232,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void callbackFromAnotherChatIsRefused() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        Env e = env(legacy().requireApproval(true).build());
         var created = e.sessions().create("ip", "ua");
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
 
@@ -181,7 +249,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void foreignCallbackAndOrphanContactGoToTheHostFallback() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).requireContact(true).build());
+        Env e = env(legacy().requireApproval(true).requireContact(true).build());
         List<String> fallback = new ArrayList<>();
         e.module().fallback(u -> fallback.add(u.has("callback_query") ? "cb" : "msg"));
 
@@ -193,7 +261,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void oversizedTokenFailsFastInsteadOfSilentlyBreakingTheKeyboard() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        Env e = env(legacy().requireApproval(true).build());
         DemoSession s = new DemoSession();
         String longToken = "t".repeat(60);
         s.setTokenHash(new TokenGenerator().hash(longToken));
@@ -209,7 +277,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void rejectCallbackRejectsSession() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        Env e = env(legacy().requireApproval(true).build());
         var created = e.sessions().create("ip", "ua");
 
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
@@ -221,7 +289,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void foreignCallbackDataIsIgnored() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireApproval(true).build());
+        Env e = env(legacy().requireApproval(true).build());
         var created = e.sessions().create("ip", "ua");
 
         e.module().getCallbackHandler().accept(callback(555L, "other:whatever", "uz"));
@@ -234,7 +302,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void contactStepAsksThenRegistersOwnPhoneAndApproves() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireContact(true).build());
+        Env e = env(legacy().requireContact(true).build());
         var created = e.sessions().create("ip", "ua");
 
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
@@ -250,7 +318,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void spoofedContactIsRefusedAndRetryWorks() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireContact(true).build());
+        Env e = env(legacy().requireContact(true).build());
         var created = e.sessions().create("ip", "ua");
 
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
@@ -267,7 +335,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void skipContinuesWithoutPhone() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.builder().requireContact(true).build());
+        Env e = env(legacy().requireContact(true).build());
         var created = e.sessions().create("ip", "ua");
 
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
@@ -282,7 +350,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void blockedUserIsDeniedAndNeverReactivated() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.defaults());
+        Env e = env(legacy().build());
         DemoUser u = e.users().register(555L, null, "Ali", null, "ali", "uz");
         u.setStatus(BaseTelegramUser.Status.BLOCKED);
         e.userRepo().save(u);
@@ -297,7 +365,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void registerNeverLiftsBlockAndKeepsStoredPhone() {
-        Env e = env(DefaultAuthFlow.Options.defaults());
+        Env e = env(legacy().build());
         e.users().register(7L, "998901112233", "Ali", null, "ali", "uz");
 
         // metadata-only re-login must not erase the stored phone
@@ -316,7 +384,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void invalidLinkMessageIsLocalizedWithUzFallback() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.defaults());
+        Env e = env(legacy().build());
 
         e.module().getCommands().get("/start").accept(start(1L, "bogus", "ru"));
         assertThat(e.bot().last().text()).isEqualTo("Ссылка недействительна или устарела.");
@@ -332,7 +400,7 @@ class DefaultAuthFlowOptionsTest {
 
     @Test
     void approvePersistsPayloadOnSessionRow() throws Exception {
-        Env e = env(DefaultAuthFlow.Options.defaults());
+        Env e = env(legacy().build());
         var created = e.sessions().create("ip", "ua");
 
         e.module().getCommands().get("/start").accept(start(555L, created.rawToken(), "uz"));
