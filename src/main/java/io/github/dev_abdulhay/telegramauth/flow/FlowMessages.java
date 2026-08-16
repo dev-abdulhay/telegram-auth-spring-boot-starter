@@ -21,6 +21,18 @@ public final class FlowMessages {
         CONFIRM_PROMPT,
         /** Format string with two {@code %s} slots: session IP, then device/user-agent. */
         CONFIRM_DETAILS,
+        /** Anti-phishing warning appended to every confirmation question. */
+        CONFIRM_WARNING,
+        /** Shown in place of the ✅/❌ question once the first step is done. */
+        CONFIRM_STEP_DONE,
+        CODE_PROMPT_BUTTON,
+        CODE_PROMPT_TYPED,
+        /** Format string with one {@code %d} slot: attempts left. */
+        CODE_WRONG,
+        CODE_NOT_A_NUMBER,
+        CODE_ATTEMPTS_EXHAUSTED,
+        /** Format string with one {@code %d} slot: minutes left in the cooldown. */
+        TOO_MANY_ATTEMPTS,
         BTN_APPROVE,
         BTN_REJECT,
         APPROVED,
@@ -65,6 +77,41 @@ public final class FlowMessages {
                     "uz", "IP: %s\nQurilma: %s",
                     "ru", "IP: %s\nУстройство: %s",
                     "en", "IP: %s\nDevice: %s")),
+            Map.entry(Key.CONFIRM_WARNING, Map.of(
+                    "uz", "⚠️ Agar siz hozir saytga kirmayotgan bo'lsangiz — ❌ bosing. "
+                            + "Hech kim sizdan bu tugmani bosishni so'ramasligi kerak.",
+                    "ru", "⚠️ Если вы сейчас не входите на сайт — нажмите ❌. "
+                            + "Никто не должен просить вас нажать эту кнопку.",
+                    "en", "⚠️ If you are not signing in right now, tap ❌. "
+                            + "Nobody should ever ask you to tap this button.")),
+            Map.entry(Key.CONFIRM_STEP_DONE, Map.of(
+                    "uz", "Tasdiqlandi. Endi raqamni tasdiqlang.",
+                    "ru", "Подтверждено. Теперь подтвердите число.",
+                    "en", "Confirmed. Now confirm the number.")),
+            Map.entry(Key.CODE_PROMPT_BUTTON, Map.of(
+                    "uz", "Brauzeringiz ekranida ko'rsatilgan raqamni tanlang.",
+                    "ru", "Выберите число, показанное на экране браузера.",
+                    "en", "Choose the number shown on your browser screen.")),
+            Map.entry(Key.CODE_PROMPT_TYPED, Map.of(
+                    "uz", "Brauzeringiz ekranida ko'rsatilgan 2 xonali raqamni yuboring.",
+                    "ru", "Отправьте двузначное число, показанное на экране браузера.",
+                    "en", "Send the 2-digit number shown on your browser screen.")),
+            Map.entry(Key.CODE_WRONG, Map.of(
+                    "uz", "Raqam noto'g'ri. Qolgan urinish: %d",
+                    "ru", "Неверное число. Осталось попыток: %d",
+                    "en", "Wrong number. Attempts left: %d")),
+            Map.entry(Key.CODE_NOT_A_NUMBER, Map.of(
+                    "uz", "00 dan 99 gacha bo'lgan raqam yuboring.",
+                    "ru", "Отправьте число от 00 до 99.",
+                    "en", "Send a number between 00 and 99.")),
+            Map.entry(Key.CODE_ATTEMPTS_EXHAUSTED, Map.of(
+                    "uz", "Urinishlar tugadi. Kirish rad etildi.",
+                    "ru", "Попытки исчерпаны. Вход отклонён.",
+                    "en", "No attempts left. Sign-in rejected.")),
+            Map.entry(Key.TOO_MANY_ATTEMPTS, Map.of(
+                    "uz", "Juda ko'p noto'g'ri urinish. %d daqiqadan so'ng qayta urinib ko'ring.",
+                    "ru", "Слишком много неверных попыток. Повторите через %d мин.",
+                    "en", "Too many wrong attempts. Try again in %d min.")),
             Map.entry(Key.BTN_APPROVE, Map.of(
                     "uz", "✅ Tasdiqlash",
                     "ru", "✅ Подтвердить",
