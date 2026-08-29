@@ -20,6 +20,13 @@ public class TelegramBot {
 
     private static final Logger log = LoggerFactory.getLogger(TelegramBot.class);
 
+    /**
+     * Per-request ceiling for the non-polling calls. Without it a stalled
+     * connection would pin the dispatcher's worker thread forever and the bot
+     * would stop answering every user, not just the one being messaged.
+     */
+    private static final Duration SEND_TIMEOUT = Duration.ofSeconds(10);
+
     private final HttpClient http;
     private final String token;
     private final String baseUrl;
@@ -49,15 +56,52 @@ public class TelegramBot {
     }
 
     public void sendMessage(long chatId, String text) {
+        sendMessage(chatId, text, null);
+    }
+
+    /** Sends a message with an optional {@code reply_markup} JSON (inline/reply keyboard). */
+    public void sendMessage(long chatId, String text, String replyMarkupJson) {
+        StringBuilder body = new StringBuilder("chat_id=").append(chatId)
+                .append("&text=").append(URLEncoder.encode(text, StandardCharsets.UTF_8));
+        if (replyMarkupJson != null && !replyMarkupJson.isBlank()) {
+            body.append("&reply_markup=").append(URLEncoder.encode(replyMarkupJson, StandardCharsets.UTF_8));
+        }
+        post("sendMessage", body.toString());
+    }
+
+    /** Acknowledges an inline-button press (short toast in the client). */
+    public void answerCallbackQuery(String callbackQueryId, String text) {
+        StringBuilder body = new StringBuilder("callback_query_id=")
+                .append(URLEncoder.encode(callbackQueryId, StandardCharsets.UTF_8));
+        if (text != null && !text.isBlank()) {
+            body.append("&text=").append(URLEncoder.encode(text, StandardCharsets.UTF_8));
+        }
+        post("answerCallbackQuery", body.toString());
+    }
+
+    /** Replaces a message's text; sending no reply_markup drops its inline keyboard. */
+    public void editMessageText(long chatId, long messageId, String text) {
+        String body = "chat_id=" + chatId + "&message_id=" + messageId
+                + "&text=" + URLEncoder.encode(text, StandardCharsets.UTF_8);
+        post("editMessageText", body);
+    }
+
+    private void post(String method, String body) {
         try {
-            String body = "chat_id=" + chatId + "&text=" + URLEncoder.encode(text, StandardCharsets.UTF_8);
-            HttpRequest req = HttpRequest.newBuilder(URI.create(baseUrl + "/bot" + token + "/sendMessage"))
+            HttpRequest req = HttpRequest.newBuilder(URI.create(baseUrl + "/bot" + token + "/" + method))
                     .header("Content-Type", "application/x-www-form-urlencoded")
+                    .timeout(SEND_TIMEOUT)
                     .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                     .build();
-            http.send(req, HttpResponse.BodyHandlers.discarding());
+            HttpResponse<Void> resp = http.send(req, HttpResponse.BodyHandlers.discarding());
+            if (resp.statusCode() / 100 != 2) {
+                log.warn("{} non-2xx: {}", method, resp.statusCode());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("{} interrupted", method);
         } catch (Exception e) {
-            log.warn("sendMessage failed", e);
+            log.warn("{} failed", method, e);
         }
     }
 

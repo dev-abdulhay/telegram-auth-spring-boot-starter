@@ -7,7 +7,7 @@
 
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.4.0</version>
     <packaging>jar</packaging>
 
     <name>telegram-auth-spring-boot-starter</name>
@@ -88,11 +88,6 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-websocket</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
             <scope>provided</scope>
         </dependency>
         <dependency>
