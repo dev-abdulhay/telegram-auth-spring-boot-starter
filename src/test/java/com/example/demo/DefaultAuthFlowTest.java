@@ -34,7 +34,10 @@ class DefaultAuthFlowTest {
         DemoSessionService sessionService = new DemoSessionService(sessionRepo, new TokenGenerator(), module);
 
         // self-registration happens in the ctor
-        new DefaultAuthFlow<>(userService, sessionService, module);
+        new DefaultAuthFlow<>(userService, sessionService, module,
+                DefaultAuthFlow.Options.builder()
+                        .codeConfirmation(io.github.dev_abdulhay.telegramauth.flow.CodeConfirmation.OFF)
+                        .build());
         assertThat(module.getCommands()).containsKey("/start");
 
         var created = sessionService.create("ip", "ua");
