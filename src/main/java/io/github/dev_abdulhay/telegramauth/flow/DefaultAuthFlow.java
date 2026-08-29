@@ -620,6 +620,13 @@ public class DefaultAuthFlow<U extends BaseTelegramUser, S extends BaseAuthSessi
             return msg(Key.SESSION_EXPIRED, lang);
         }
 
+        // re-checked here because a block can land mid-flow: the entry checks ran
+        // before the code question, and the TYPED path has no entry check at all
+        if (isBlocked(userService.findByTelegramId(userId).orElse(null))) {
+            clearPending(userId, rawToken);
+            return msg(Key.ACCESS_DENIED, lang);
+        }
+
         if (guess == module.getConfirmCodeGenerator().codeFor(hash)) {
             U user = registerFrom(userId, from, phoneOf(userId, rawToken));
             boolean ok = sessionService.approve(hash, user);
