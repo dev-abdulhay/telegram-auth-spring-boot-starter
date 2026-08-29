@@ -2,6 +2,7 @@ package io.github.dev_abdulhay.telegramauth.config;
 
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotLifecycle;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
+import io.github.dev_abdulhay.telegramauth.flow.DefaultAuthFlow;
 import io.github.dev_abdulhay.telegramauth.security.TokenGenerator;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -34,5 +35,19 @@ public class TelegramAuthAutoConfiguration {
     @ConditionalOnMissingBean
     public TelegramBotLifecycle telegramBotLifecycle(ObjectProvider<TelegramBotModule> modules) {
         return new TelegramBotLifecycle(modules);
+    }
+
+    /**
+     * Flow options bound from {@code telegram.auth.flow}, so an operator can tune
+     * the confirmation steps without a rebuild. Inject it into the host's
+     * {@code DefaultAuthFlow} bean; a host with several user types resolves the
+     * named groups itself via
+     * {@code properties.getFlows().get(name).toOptions(properties.getFlow())}.
+     * Declaring an {@code Options} bean of your own replaces this entirely.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public DefaultAuthFlow.Options telegramAuthFlowOptions(TelegramAuthProperties properties) {
+        return properties.getFlow().toOptions();
     }
 }

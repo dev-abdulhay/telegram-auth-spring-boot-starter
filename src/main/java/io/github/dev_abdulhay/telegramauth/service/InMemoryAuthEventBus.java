@@ -9,10 +9,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 /**
- * Single-process pub/sub. The starter falls back to this when no Redis bean
- * is available — fine for one-instance deployments. Listeners are removed
- * from the registry the moment the event is dispatched, so a terminal event
- * cannot be observed twice.
+ * Single-process pub/sub — fine for one-instance deployments. Listeners are
+ * removed from the registry the moment the event is dispatched, so one
+ * subscription observes exactly one event; a client that wants the next one
+ * (after the non-terminal {@code AWAITING_CODE}) subscribes again.
  */
 public class InMemoryAuthEventBus implements AuthEventBus {
 
