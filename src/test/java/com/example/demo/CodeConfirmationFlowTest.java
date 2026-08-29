@@ -7,6 +7,7 @@ import io.github.dev_abdulhay.telegramauth.api.dto.AuthApproveResult;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession;
 import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession.Status;
+import io.github.dev_abdulhay.telegramauth.entity.BaseTelegramUser;
 import io.github.dev_abdulhay.telegramauth.flow.CodeConfirmation;
 import io.github.dev_abdulhay.telegramauth.flow.DefaultAuthFlow;
 import io.github.dev_abdulhay.telegramauth.security.ConfirmCode;
@@ -321,6 +322,25 @@ class CodeConfirmationFlowTest {
         // the single attempt was never spent, so the correct number still works
         e.module().getTextHandler().accept(text(String.format("%02d", codeOf(e, created.rawToken()))));
         assertThat(((BaseAuthSession) created.entity()).getStatus()).isEqualTo(Status.APPROVED);
+    }
+
+    @Test
+    void aUserBlockedMidFlowCannotFinishTheTypedCodeStep() throws Exception {
+        Env e = env(typed().build());
+        // the user exists from an earlier login, so /start passes the entry check
+        e.users().register(USER, null, "Ali", null, null, "uz");
+        var created = e.sessions().create("ip", "ua");
+        e.module().getCommands().get("/start").accept(start(created.rawToken()));
+        assertThat(((BaseAuthSession) created.entity()).getStatus()).isEqualTo(Status.AWAITING_CODE);
+
+        // admin blocks them while the code question is on screen
+        e.users().findByTelegramId(USER).orElseThrow()
+                .setStatus(BaseTelegramUser.Status.BLOCKED);
+
+        e.module().getTextHandler().accept(text(String.format("%02d", codeOf(e, created.rawToken()))));
+
+        assertThat(((BaseAuthSession) created.entity()).getStatus()).isNotEqualTo(Status.APPROVED);
+        assertThat(e.bot().last().text()).isEqualTo("Kirish taqiqlangan.");
     }
 
     // --- cooldown ---

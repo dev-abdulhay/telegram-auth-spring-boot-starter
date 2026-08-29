@@ -73,6 +73,13 @@ the browser that started this login".
   `AWAITING_CODE`.
 - `sessionTtl` default `3m` → `5m`; the contact and code steps share that window.
 
+### Fixed
+- The confirmation-code guess re-checks the user's `BLOCKED` status. The entry
+  checks run before the code question is asked — and the `TYPED` text path had
+  no entry check at all — so a user blocked *mid-flow* (while the code question
+  was on screen) could still complete the login. `handleGuess` now answers
+  `ACCESS_DENIED` for a blocked user in both `BUTTON` and `TYPED` modes.
+
 ### Breaking
 - `codeConfirmation` defaults to `BUTTON`, so `Options.defaults()` and the
   3-argument `DefaultAuthFlow` constructor change behaviour. Opt out with
