@@ -7,6 +7,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.MappedSuperclass;
+import jakarta.persistence.PreUpdate;
 
 import java.time.OffsetDateTime;
 
@@ -23,7 +24,7 @@ public abstract class BaseTelegramUser {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "telegram_id", nullable = false, unique = true)
+    @Column(name = "telegram_id", nullable = false, unique = true, updatable = false)
     private Long telegramId;
 
     @Column(name = "phone", length = 20)
@@ -45,14 +46,16 @@ public abstract class BaseTelegramUser {
     @Column(name = "status", length = 30, nullable = false)
     private Status status = Status.PENDING;
 
-    @Column(name = "external_user_id", length = 100)
-    private String externalUserId;
-
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt = OffsetDateTime.now();
 
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt = OffsetDateTime.now();
+
+    @PreUpdate
+    void onUpdate() {
+        this.updatedAt = OffsetDateTime.now();
+    }
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -70,8 +73,6 @@ public abstract class BaseTelegramUser {
     public void setLanguageCode(String languageCode) { this.languageCode = languageCode; }
     public Status getStatus() { return status; }
     public void setStatus(Status status) { this.status = status; }
-    public String getExternalUserId() { return externalUserId; }
-    public void setExternalUserId(String externalUserId) { this.externalUserId = externalUserId; }
     public OffsetDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(OffsetDateTime createdAt) { this.createdAt = createdAt; }
     public OffsetDateTime getUpdatedAt() { return updatedAt; }
