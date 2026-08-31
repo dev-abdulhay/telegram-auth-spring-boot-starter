@@ -3,6 +3,8 @@ package io.github.dev_abdulhay.telegramauth.bot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -42,6 +44,8 @@ public class TelegramBotRunner {
 
     private final TelegramBotModule module;
     private final ThreadFactory threadFactory;
+    private final Duration failureBudget;
+    private final PollFailureListener failureListener;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong offset = new AtomicLong(0);
@@ -50,7 +54,7 @@ public class TelegramBotRunner {
     private volatile BotUpdateDispatcher dispatcher;
 
     public TelegramBotRunner(TelegramBotModule module) {
-        this(module, null);
+        this(module, null, null, null);
     }
 
     /**
@@ -61,8 +65,25 @@ public class TelegramBotRunner {
      *                      references a virtual-thread API.
      */
     public TelegramBotRunner(TelegramBotModule module, ThreadFactory threadFactory) {
+        this(module, threadFactory, null, null);
+    }
+
+    /**
+     * @param failureBudget how long polling may fail continuously before the runner
+     *                      stops itself; {@code null} keeps retrying forever, which
+     *                      is the behaviour every pre-white-label host has today.
+     *                      Measured in time rather than attempts: a 409 from a
+     *                      competing poller and a DNS blip arrive through the same
+     *                      path as a revoked token, and counting attempts would kill
+     *                      a healthy bot during a brief outage.
+     * @param listener      notified once, just before the runner stops
+     */
+    public TelegramBotRunner(TelegramBotModule module, ThreadFactory threadFactory,
+                             Duration failureBudget, PollFailureListener listener) {
         this.module = module;
         this.threadFactory = threadFactory;
+        this.failureBudget = failureBudget;
+        this.failureListener = listener;
     }
 
     public void start() {
@@ -146,6 +167,9 @@ public class TelegramBotRunner {
 
     private void loop() {
         int timeoutS = (int) module.getPollingTimeout().toSeconds();
+        // start of the current unbroken run of failures, or null while healthy
+        Instant failingSince = null;
+        boolean gaveUp = false;
         while (running.get()) {
             try {
                 // recomputed every iteration, not snapshotted before the loop: the
@@ -162,17 +186,33 @@ public class TelegramBotRunner {
                         ? module.getBot().getUpdates(offset.get(), timeoutS, allowed)
                         : module.getBot().getUpdates(offset.get(), timeoutS);
                 long maxId = dispatcher.dispatch(json);
+                // any ok response — even an empty batch — proves the token still works
+                if (maxId >= 0) {
+                    failingSince = null;
+                }
                 if (maxId > 0) {
                     offset.set(maxId + 1);
                 } else if (maxId < 0) {
                     // non-ok response (bad token, 409 from a competing poller, ...) —
                     // back off instead of hammering the API in a tight loop
+                    if (failingSince == null) failingSince = Instant.now();
+                    if (shouldGiveUp(failingSince)) {
+                        gaveUp = true;
+                        break;
+                    }
                     Thread.sleep(module.getPollingInterval().toMillis());
                 }
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
+                // a thrown call counts against the same clock as a non-ok response:
+                // an unreachable API and a revoked token are both "not polling"
+                if (failingSince == null) failingSince = Instant.now();
+                if (shouldGiveUp(failingSince)) {
+                    gaveUp = true;
+                    break;
+                }
                 log.warn("getUpdates failed for @{}; backing off", module.getUsername(), e);
                 try {
                     Thread.sleep(module.getPollingInterval().toMillis());
@@ -182,5 +222,50 @@ public class TelegramBotRunner {
                 }
             }
         }
+        if (gaveUp) tearDownAfterGiveUp();
+    }
+
+    /**
+     * Decides whether the failure budget is spent, and if it is, records the
+     * decision and announces it. Returns {@code true} when the caller should leave
+     * the loop — the teardown itself belongs after the loop, in
+     * {@link #tearDownAfterGiveUp()}, not here.
+     */
+    private boolean shouldGiveUp(Instant failingSince) {
+        if (failureBudget == null) return false;
+        Duration failingFor = Duration.between(failingSince, Instant.now());
+        if (failingFor.compareTo(failureBudget) < 0) return false;
+        log.warn("giving up on @{} after {}ms of unbroken poll failures",
+                module.getUsername(), failingFor.toMillis());
+        // stop() must not run on the poll thread, so the flag is flipped by hand;
+        // it also makes a later stop() by the host a safe no-op
+        running.set(false);
+        if (failureListener != null) {
+            try {
+                failureListener.onPollFailure(module, failingFor);
+            } catch (RuntimeException e) {
+                log.warn("poll-failure listener threw for @{}", module.getUsername(), e);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Releases both pools once {@link #loop()} has finished, so a runner that gave
+     * up does not leave a poll thread (and, once one update has been handled, a
+     * worker thread) alive for the life of the JVM — one leak per revoked token.
+     *
+     * <p>Runs only on the give-up path, and deliberately does not call
+     * {@link #stop()}: {@code stop()} calls {@code shutdownNow()} on the very
+     * executor this thread belongs to, so it would interrupt the poll thread
+     * mid-drain. {@code shutdown()} instead lets this last task return and the
+     * poll thread exit by itself; the worker is drained first, on the same terms
+     * as a host-initiated stop.
+     */
+    private void tearDownAfterGiveUp() {
+        drainWorker();
+        ExecutorService e = executor;
+        if (e != null) e.shutdown();
+        log.info("Telegram polling stopped for @{}", module.getUsername());
     }
 }
