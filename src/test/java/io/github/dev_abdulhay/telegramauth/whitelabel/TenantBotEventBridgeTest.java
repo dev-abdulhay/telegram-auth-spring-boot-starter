@@ -16,12 +16,14 @@ class TenantBotEventBridgeTest {
     static class RecordingRegistry extends TenantBotRegistry<DemoU, DemoS> {
         final List<String> calls = new ArrayList<>();
         boolean failOnStart;
+        boolean failOnStartWithError;
 
         RecordingRegistry() { super(null, null, null, null, null); }
 
         @Override public void start(ManagedBot bot) {
             calls.add("start:" + bot.botUserId());
             if (failOnStart) throw new IllegalStateException("no token");
+            if (failOnStartWithError) throw new AssertionError("no token");
         }
         @Override public void stop(long botUserId) { calls.add("stop:" + botUserId); }
         @Override public void restart(ManagedBot bot) { calls.add("restart:" + bot.botUserId()); }
@@ -48,6 +50,16 @@ class TenantBotEventBridgeTest {
     void aFailedTenantNeverEscapesIntoTheManagerBot() {
         RecordingRegistry registry = new RecordingRegistry();
         registry.failOnStart = true;
+        TenantBotEventBridge<DemoU, DemoS> bridge = new TenantBotEventBridge<>(registry);
+
+        assertThatCode(() -> bridge.onCreated(bot(555L))).doesNotThrowAnyException();
+        assertThat(registry.calls).containsExactly("start:555");
+    }
+
+    @Test
+    void anErrorFromStartNeverEscapesEither() {
+        RecordingRegistry registry = new RecordingRegistry();
+        registry.failOnStartWithError = true;
         TenantBotEventBridge<DemoU, DemoS> bridge = new TenantBotEventBridge<>(registry);
 
         assertThatCode(() -> bridge.onCreated(bot(555L))).doesNotThrowAnyException();
