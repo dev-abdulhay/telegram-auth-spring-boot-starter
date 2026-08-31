@@ -19,6 +19,8 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
@@ -201,6 +203,81 @@ class TenantBotRegistryTest {
             assertThat(firstBot.polls.get())
                     .as("the old runner's poll count must go silent after restart")
                     .isEqualTo(countRightAfterRestart);
+        } finally {
+            registry.stopAll();
+        }
+    }
+
+    /**
+     * A {@code stop()} that removes a reservation before checking whether it has
+     * been published leaves the starting thread finishing into a slot the map no
+     * longer holds: the runner it starts then polls forever, invisible to every
+     * accessor and to future {@code stop}/{@code stopAll} calls. This drives
+     * {@code start()} through its reservation window on a background thread —
+     * parked deterministically on a latch rather than by sleeping — and lands
+     * {@code stop()} while the reservation is still unpublished. Either outcome
+     * (the bot ends up running and stoppable, or ends up absent) is acceptable;
+     * what is never acceptable is polling while {@link TenantBotRegistry#running()}
+     * reports it absent.
+     */
+    @Test
+    void stopDuringAReservationDoesNotOrphanTheStartingRunner() throws InterruptedException {
+        ManagedBot b = storedBot(555L, "555:LATCH");
+        CountDownLatch reserved = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        TenantBotRegistry<DemoU, DemoS> registry = new TenantBotRegistry<>(managedBots, (mb, token) -> {
+            reserved.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            QuietBot quietBot = new QuietBot(token);
+            quietBots.put(token, quietBot);
+            TelegramBotModule m = TelegramBotModule.builder(token, mb.username())
+                    .bot(quietBot)
+                    .botUserId(mb.botUserId())
+                    .build();
+            return new RunningBot<>(m, new StubTenantSessionService(m));
+        }, null, null, null);
+
+        Thread starter = new Thread(() -> registry.start(b), "registry-start-race");
+        starter.start();
+        try {
+            assertThat(reserved.await(2, TimeUnit.SECONDS))
+                    .as("start() must have reserved the slot before the race begins")
+                    .isTrue();
+
+            // Lands while start() is parked inside the reservation window: entry is
+            // still null at this point, so a correct stop() must leave the
+            // reservation alone rather than evict it out from under the starter.
+            registry.stop(555L);
+        } finally {
+            release.countDown();
+            starter.join(2_000);
+        }
+
+        QuietBot startedBot = quietBots.get("555:LATCH");
+        assertThat(startedBot).as("the factory must have run").isNotNull();
+        try {
+            if (registry.running().contains(555L)) {
+                assertThat(registry.sessionServiceFor(555L)).isPresent();
+                waitUntil(Duration.ofSeconds(2), () -> startedBot.polls.get() > 0);
+
+                registry.stop(555L);
+                int countAfterStop = startedBot.polls.get();
+                Thread.sleep(300);
+                assertThat(startedBot.polls.get())
+                        .as("a bot the registry reports as running must actually be stoppable")
+                        .isEqualTo(countAfterStop);
+            } else {
+                Thread.sleep(200);
+                int count = startedBot.polls.get();
+                Thread.sleep(300);
+                assertThat(startedBot.polls.get())
+                        .as("a bot absent from running() must not still be polling in the background")
+                        .isEqualTo(count);
+            }
         } finally {
             registry.stopAll();
         }

@@ -35,7 +35,11 @@ import java.util.stream.Collectors;
  * again, so a failed start never permanently blocks a later retry. Until the
  * build finishes, the bot is not yet visible through {@link #running()} or
  * {@link #sessionServiceFor}: both only report a slot whose runner has actually
- * started.
+ * started. {@link #stop}, {@link #stopAll} and {@link #restart} are safe against
+ * that same reservation window: a {@code stop} landing while a concurrent
+ * {@code start} has reserved but not yet published its runner leaves the
+ * reservation untouched rather than evicting it out from under the starting
+ * thread, which would otherwise finish into a slot the map no longer holds.
  */
 public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSession> {
 
@@ -137,10 +141,22 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
         }
     }
 
-    /** Stops and deregisters one tenant bot; unknown ids, and ids still reserving, are ignored. */
+    /**
+     * Stops and deregisters one tenant bot; unknown ids, and ids still reserving
+     * (a concurrent {@code start()} has not yet published its runner), are ignored.
+     *
+     * <p>Reads before removing, and removes value-conditionally on the exact slot
+     * just read: an unconditional {@code remove} would evict another thread's
+     * reservation out from under it, and the runner it eventually starts would
+     * finish into a slot the map no longer holds — polling forever, invisible to
+     * {@link #running()}, {@link #sessionServiceFor} and to every future
+     * {@code stop}/{@code stopAll}, and inviting a second poller on the same token
+     * the next time {@code start} is called for this id.
+     */
     public void stop(long botUserId) {
-        Slot<U, S> slot = running.remove(botUserId);
+        Slot<U, S> slot = running.get(botUserId);
         if (slot == null || slot.entry == null) return;
+        if (!running.remove(botUserId, slot)) return;
         slot.entry.runner().stop();
         log.info("tenant bot {} stopped", botUserId);
     }
