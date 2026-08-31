@@ -7,6 +7,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.http.HttpClient;
+import java.time.Duration;
 import java.util.List;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
@@ -71,6 +72,38 @@ class ManagedBotApiTest {
                 .withRequestBody(WireMock.containing("added_user_ids=%5B42%2C43%5D")));
     }
 
+    /**
+     * Omitting {@code added_user_ids} makes Telegram keep the previous allow-list,
+     * so a host revoking the last person's access would get a silent no-op. An
+     * empty list has to travel as an encoded empty array.
+     */
+    @Test
+    void anEmptyAllowListIsTransmittedAsAnEmptyArray() {
+        server.stubFor(post(urlPathEqualTo("/bot123:ABC/setManagedBotAccessSettings"))
+                .willReturn(aResponse().withHeader("Content-Type", "application/json")
+                        .withBody("{\"ok\":true,\"result\":true}")));
+
+        bot.setManagedBotAccessSettings(555L, true, List.of());
+
+        server.verify(postRequestedFor(urlPathEqualTo("/bot123:ABC/setManagedBotAccessSettings"))
+                .withRequestBody(WireMock.containing("is_access_restricted=true"))
+                .withRequestBody(WireMock.containing("added_user_ids=%5B%5D")));
+    }
+
+    /** Only {@code null} means "leave whatever Telegram has alone". */
+    @Test
+    void aNullAllowListOmitsTheParameter() {
+        server.stubFor(post(urlPathEqualTo("/bot123:ABC/setManagedBotAccessSettings"))
+                .willReturn(aResponse().withHeader("Content-Type", "application/json")
+                        .withBody("{\"ok\":true,\"result\":true}")));
+
+        bot.setManagedBotAccessSettings(555L, true, null);
+
+        assertThat(server.getAllServeEvents().get(0).getRequest().getBodyAsString())
+                .contains("is_access_restricted=true")
+                .doesNotContain("added_user_ids");
+    }
+
     @Test
     void aTooManyRequestsResponseIsWaitedOutAndRetriedOnce() {
         server.stubFor(post(urlPathEqualTo("/bot123:ABC/getManagedBotToken"))
@@ -85,6 +118,29 @@ class ManagedBotApiTest {
 
         assertThat(bot.getManagedBotToken(555L)).isEqualTo("999:AFTER-WAIT");
         assertThat(server.getAllServeEvents()).hasSize(2);
+    }
+
+    /**
+     * The wait runs on the single update worker that also serves the auth flow, so
+     * a {@code retry_after} past the configured budget must fail fast instead of
+     * taking logins down with it; recovering is the caller's job
+     * ({@code tokenFetchRetries}, {@code onTokenFetchFailed}, {@code fetchAndStore}).
+     */
+    @Test
+    void aRateLimitLongerThanTheBudgetThrowsInsteadOfSleeping() {
+        TelegramBot impatient = new TelegramBot(HttpClient.newHttpClient(), "123:ABC",
+                "http://localhost:" + server.port(), Duration.ofSeconds(2));
+        server.stubFor(post(urlPathEqualTo("/bot123:ABC/getManagedBotToken"))
+                .willReturn(aResponse().withStatus(429).withHeader("Content-Type", "application/json")
+                        .withBody("{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":30}}")));
+
+        long startedAt = System.nanoTime();
+        assertThatThrownBy(() -> impatient.getManagedBotToken(555L))
+                .isInstanceOf(TelegramApiException.class)
+                .hasMessageContaining("rate-limited");
+
+        assertThat(Duration.ofNanos(System.nanoTime() - startedAt)).isLessThan(Duration.ofSeconds(5));
+        assertThat(server.getAllServeEvents()).hasSize(1);
     }
 
     @Test
