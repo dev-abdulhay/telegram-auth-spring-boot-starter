@@ -20,7 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Telegram has no method to delete a managed bot, so the bot itself keeps
   existing under the owner's account); `handleUpdate(update)` processes one
   `managed_bot` update, fetching the token with retry/backoff before
-  publishing it.
+  publishing it;
+  `fetchAndStore(botUserId, ownerUserId)` does the same work without an
+  update — the recovery entry point for a bot that exists on Telegram with no
+  token stored here (retries exhausted, or the process died after the poller
+  advanced Telegram's offset). It throws instead of re-publishing
+  `onTokenFetchFailed`, so recovering from inside that callback cannot loop.
+- `TelegramBot.DEFAULT_MAX_RATE_LIMIT_WAIT` (60s) and a
+  `TelegramBot(HttpClient, token, baseUrl, maxRateLimitWait)` constructor: the
+  longest `retry_after` a bot will sit out in-line. The wait runs on the
+  module's single update worker, so beyond the budget the call now throws
+  `TelegramApiException` instead of stalling every other update — including
+  logins — for minutes. Previously hardcoded at 60s with no way to lower it.
 - `ManagedBotTokenStore` contract with two implementations:
   `InMemoryManagedBotStore` (map-backed, non-durable) and
   `JpaManagedBotTokenStore<M extends BaseManagedBot>`, paired with the
@@ -55,6 +66,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `module.fallback(...)` will stop receiving them on that module. The
   library's own auth flow is unaffected — it consumes only `message` and
   `callback_query`.
+
+### Fixed
+- `ManagedBotService.decommission(botUserId)` no longer resurrects the bot it
+  just decommissioned. Revoking a token *is* a token change, so Telegram
+  echoed it back as a `managed_bot` update; that update found an unknown bot,
+  fetched the brand-new working token, re-created the row and fired
+  `onCreated` — making the documented "left unreachable by us" promise false.
+  The service now keeps a bounded, 5-minute, JVM-local record of the token
+  changes it initiated and drops their echoes.
+- `ManagedBotService.rotateToken(botUserId)` publishes `onTokenRotated` once
+  instead of twice, via the same guard. The rotation suppression is one-shot,
+  so a genuinely owner-initiated rotation arriving later is still announced.
+- `setManagedBotAccessSettings` / `ManagedBotService.setAccessSettings` can
+  now clear an allow-list. An empty `addedUserIds` list omitted the parameter
+  entirely, and Telegram then kept the previous list — an access revocation
+  that silently did nothing. An empty list now transmits `added_user_ids=[]`;
+  only `null` omits the parameter.
+- The poller's `allowed_updates` list is recomputed on every long-poll
+  iteration instead of once before the loop. A host whose polling started
+  before the auto-configured `ManagedBotUpdateHandler` singleton was built
+  pinned the list to `null` forever, so `managed_bot` was never requested —
+  no error, no log, the feature silently dead.
+- `JpaManagedBotTokenStore`'s `Supplier<M> factory` contract is documented: it
+  must return a blank, unsaved entity, because `save` uses
+  `getBotUserId() == null` as its is-new test.
 
 ## [0.4.0] - 2026-08-17
 

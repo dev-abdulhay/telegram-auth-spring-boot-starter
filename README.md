@@ -630,6 +630,15 @@ String link = managedBotService.createLink("mycompany_sales_bot", "My Company Sa
 // and the new bot's `managed_bot` update arrives and is handled automatically
 ```
 
+The suggested username is validated locally and `createLink` throws
+`IllegalArgumentException` when it is shorter than 5 or longer than 32
+characters, contains anything outside `A-Z a-z 0-9 _`, or does not end in
+`bot` (case-insensitively) — the three rules Telegram could never accept. It
+is only a *suggestion*: the user may edit it in Telegram's confirmation
+dialog, and the Bot API offers no way to check whether a username is free, so
+a valid suggestion can still be taken. Passing `null` or a blank username
+builds a link with no suggestion at all.
+
 React to a new bot by implementing `ManagedBotEvents#onCreated` (every method
 is a no-op default, so implement only what you need):
 
@@ -656,6 +665,59 @@ the replacement Telegram issues) and forgets the bot locally, firing
 owning user's Telegram account — the user removes it themselves through
 BotFather.
 
+Revoking is itself a token change, so Telegram sends the manager a
+`managed_bot` update echoing it. `ManagedBotService` suppresses that echo for
+5 minutes per bot; otherwise the update would look like a brand-new bot and
+the service would fetch the fresh token and re-create the row it just deleted.
+The same guard swallows exactly one echo after `rotateToken`, so a rotation
+you initiate fires `onTokenRotated` once rather than twice. **The guard is
+JVM-local and not replicated** (like the flow's pending-login state): on a
+multi-instance deployment an echo delivered to a different instance, or after
+a restart, is still processed as if the owner had done it.
+
+`decommission` is deliberately lenient about ids it does not know — unlike
+`rotateToken`, which throws `IllegalArgumentException`. That is the only way
+to revoke a bot whose token fetch failed and which therefore has no row.
+
+### Recovering a bot with no stored token
+
+When `getManagedBotToken` fails every configured attempt, the bot exists on
+Telegram with nothing stored here, `onTokenFetchFailed` fires, and no further
+update is coming. The same gap opens if the process dies mid-handler — the
+poller advances Telegram's offset as soon as the update is queued.
+
+`ManagedBotService#fetchAndStore(long botUserId, long ownerUserId)` is the
+recovery entry point: it does exactly what update handling does (fetch with
+the configured retries, encrypt, store, then publish `onCreated` or
+`onTokenRotated`) without needing an update. Unlike `handleUpdate` it
+**throws** `TelegramApiException` on failure instead of publishing
+`onTokenFetchFailed` again, so calling it from inside that callback cannot
+loop:
+
+```java
+@Bean
+ManagedBotEvents managedBotEvents(ManagedBotService service) {
+    return new ManagedBotEvents() {
+        @Override
+        public void onTokenFetchFailed(long botUserId, long ownerUserId, Exception cause) {
+            // hand it to your scheduler — the usual cause is rate limiting,
+            // and this callback runs on the bot's single update worker
+            scheduler.schedule(() -> service.fetchAndStore(botUserId, ownerUserId),
+                    1, TimeUnit.MINUTES);
+        }
+    };
+}
+```
+
+### Restricting who may use a managed bot
+
+`setAccessSettings(botUserId, restricted, addedUserIds)` writes both fields in
+one call. An **empty** `addedUserIds` list clears the allow-list (only the
+owner keeps access); `null` omits the parameter and leaves whatever Telegram
+already has. Telegram caps the list at 10 users and ignores it entirely when
+`restricted` is `false`; a longer list is rejected with
+`IllegalArgumentException` before any request is sent.
+
 ### Security notes
 
 - Tokens are stored **encrypted at rest** — the default `TokenEncryptor` is
@@ -667,11 +729,25 @@ BotFather.
 - **The host owns key custody.** Declaring your own `TokenEncryptor` bean
   (e.g. delegating to a KMS or vault) replaces the built-in AES-GCM default,
   and `telegram.managed-bots.encryption-key` is then not needed at all.
+- **Do not set `management.endpoint.env.show-values: ALWAYS`.** Spring Boot 3
+  masks property values under the `/env` and `/configprops` Actuator endpoints
+  by default; that setting unmasks them and would publish
+  `telegram.managed-bots.encryption-key` — the key that decrypts every stored
+  token — to anyone who can reach the endpoint. Leave it at the default
+  (`NEVER`), or at most `WHEN_AUTHORIZED`.
 - **A token can go dead at any time** — the owning user can revoke or rotate
   it from BotFather independently of this library, so your application must
   tolerate that. When it happens, Telegram delivers another `managed_bot`
   update and `ManagedBotService` re-fetches and re-stores the token
   automatically, then calls `onTokenRotated`.
+- **A rate-limited managed-bot call fails fast rather than blocking logins.**
+  The `429` wait runs on the module's single update worker — the same thread
+  that serves the auth flow — so `TelegramBot` waits out a `retry_after` only
+  up to `TelegramBot.DEFAULT_MAX_RATE_LIMIT_WAIT` (60s) and throws beyond it,
+  leaving recovery to `token-fetch-retries`, `onTokenFetchFailed` and
+  `fetchAndStore`. Lower the budget by building the bot yourself:
+  `TelegramBotModule.builder(token, username).bot(new TelegramBot(httpClient,
+  token, "https://api.telegram.org", Duration.ofSeconds(5)))`.
 
 ## Status & roadmap
 
@@ -682,6 +758,7 @@ BotFather.
 - [x] `DefaultAuthFlow` with self-registering `/start`.
 - [x] Contact-share + Approve/Reject inline keyboard (opt-in `Options`), 3-language bot texts.
 - [x] Number matching (`codeConfirmation`) with per-user cooldown, and flow options bindable from YAML.
+- [x] Managed bots (opt-in): `/newbot` deep link, encrypted token custody, lifecycle events, access settings, decommission.
 - [ ] SSE & WebSocket transports.
 - [ ] Redis-backed event bus + multi-instance horizontal scaling (would also make in-flight login state survive failover).
 
