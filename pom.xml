@@ -62,6 +62,27 @@
 
     <dependencyManagement>
         <dependencies>
+            <!--
+                WireMock's own POM manages Jetty via jetty-bom 11.0.20, but Spring
+                Boot's BOM (imported below) separately pins a subset of those same
+                Jetty artifacts (jetty-server, jetty-http, jetty-io, ...) to 12.0.14,
+                while the rest (jetty-servlet, jetty-webapp, http2-server, ...) fall
+                through to WireMock's 11.0.20. That split-version Jetty stack breaks
+                WireMock's embedded server startup ("no suitable HttpServerFactory").
+                Declaring this import first gives it precedence over Spring Boot's
+                BOM for the overlapping artifacts, so the whole Jetty stack that
+                WireMock (test scope only) pulls in resolves to one consistent
+                version. This has no effect on production/runtime code: the starter
+                does not depend on Jetty itself, and spring-boot-starter-web is
+                `provided` (host apps bring their own server).
+            -->
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-bom</artifactId>
+                <version>11.0.20</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <!-- Spring Boot BOM — pins every Spring/Jackson/Liquibase/Caffeine version -->
             <dependency>
                 <groupId>org.springframework.boot</groupId>
@@ -120,6 +141,13 @@
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Not managed by the Spring Boot BOM, so the version is pinned explicitly -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock</artifactId>
+            <version>3.9.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
