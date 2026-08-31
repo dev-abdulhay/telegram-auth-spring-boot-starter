@@ -1,5 +1,7 @@
 package io.github.dev_abdulhay.telegramauth.bot;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -102,6 +105,93 @@ public class TelegramBot {
             log.warn("{} interrupted", method);
         } catch (Exception e) {
             log.warn("{} failed", method, e);
+        }
+    }
+
+    /** Telegram's own ceiling for a rate-limit wait we are willing to sit through. */
+    private static final int MAX_RETRY_AFTER_SECONDS = 60;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** @param botUserId Telegram user id of the managed bot, the API's {@code user_id} */
+    public String getManagedBotToken(long botUserId) {
+        return postForResult("getManagedBotToken", "user_id=" + botUserId).asText();
+    }
+
+    /** Revokes the managed bot's current token and returns the new one. */
+    public String replaceManagedBotToken(long botUserId) {
+        return postForResult("replaceManagedBotToken", "user_id=" + botUserId).asText();
+    }
+
+    public JsonNode getManagedBotAccessSettings(long botUserId) {
+        return postForResult("getManagedBotAccessSettings", "user_id=" + botUserId);
+    }
+
+    /**
+     * @param addedUserIds up to 10 users who may access the bot besides its owner;
+     *                     ignored by Telegram when {@code restricted} is false
+     */
+    public void setManagedBotAccessSettings(long botUserId, boolean restricted, List<Long> addedUserIds) {
+        StringBuilder body = new StringBuilder("user_id=").append(botUserId)
+                .append("&is_access_restricted=").append(restricted);
+        if (addedUserIds != null && !addedUserIds.isEmpty()) {
+            StringBuilder json = new StringBuilder("[");
+            for (int i = 0; i < addedUserIds.size(); i++) {
+                if (i > 0) json.append(',');
+                json.append(addedUserIds.get(i));
+            }
+            json.append(']');
+            body.append("&added_user_ids=")
+                    .append(URLEncoder.encode(json.toString(), StandardCharsets.UTF_8));
+        }
+        postForResult("setManagedBotAccessSettings", body.toString());
+    }
+
+    /**
+     * POSTs and returns the {@code result} node. A 429 is a wait signal rather than
+     * a failure: we honour {@code retry_after} once and retry, which is separate
+     * from any retry budget the caller keeps.
+     */
+    private JsonNode postForResult(String method, String body) {
+        JsonNode response = send(method, body);
+        Integer retryAfter = rateLimitDelay(response);
+        if (retryAfter != null) {
+            try {
+                Thread.sleep(Math.min(retryAfter, MAX_RETRY_AFTER_SECONDS) * 1000L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new TelegramApiException(429, "interrupted while waiting out a rate limit");
+            }
+            response = send(method, body);
+        }
+        if (!response.path("ok").asBoolean(false)) {
+            throw new TelegramApiException(response.path("error_code").asInt(0),
+                    response.path("description").asText("unknown error"));
+        }
+        return response.path("result");
+    }
+
+    private static Integer rateLimitDelay(JsonNode response) {
+        if (response.path("error_code").asInt(0) != 429) return null;
+        int seconds = response.path("parameters").path("retry_after").asInt(1);
+        return Math.max(seconds, 1);
+    }
+
+    private JsonNode send(String method, String body) {
+        try {
+            HttpRequest req = HttpRequest.newBuilder(URI.create(baseUrl + "/bot" + token + "/" + method))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .timeout(SEND_TIMEOUT)
+                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                    .build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            return MAPPER.readTree(resp.body());
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new TelegramApiException(0, method + " interrupted");
+        } catch (TelegramApiException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new TelegramApiException(0, method + " failed: " + e.getClass().getSimpleName());
         }
     }
 
