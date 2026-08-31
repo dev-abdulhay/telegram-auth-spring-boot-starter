@@ -71,6 +71,61 @@ class PollFailureBudgetTest {
         }
     }
 
+    /**
+     * Fails three times, succeeds once, forever. No single failing run comes near
+     * the budget, but the bot spends many budgets' worth of wall time in this
+     * fail-recover cycle — only the reset on success keeps it alive.
+     */
+    static class IntermittentBot extends TelegramBot {
+        final AtomicInteger failures = new AtomicInteger();
+        final AtomicInteger successes = new AtomicInteger();
+        private final AtomicInteger calls = new AtomicInteger();
+
+        IntermittentBot() { super(java.net.http.HttpClient.newHttpClient(), "123:ABC"); }
+
+        @Override public String getUpdates(long offset, int timeoutSeconds) throws Exception {
+            if (calls.incrementAndGet() % 4 != 0) {
+                failures.incrementAndGet();
+                return "{\"ok\":false,\"error_code\":409,\"description\":\"Conflict\"}";
+            }
+            successes.incrementAndGet();
+            Thread.sleep(20);
+            return "{\"ok\":true,\"result\":[]}";
+        }
+        @Override public String getUpdates(long offset, int timeoutSeconds, List<String> allowed) throws Exception {
+            return getUpdates(offset, timeoutSeconds);
+        }
+    }
+
+    /**
+     * Non-ok until {@link #revive()}, then healthy — a token restored in BotFather.
+     * Once revived it delivers a real update on its fourth poll, late enough that a
+     * teardown which wrongly closed the restarted runner's worker pool has already
+     * happened: the handler then never runs, which is what makes that bug visible.
+     */
+    static class RevivingBot extends TelegramBot {
+        final AtomicInteger pollsAfterRevival = new AtomicInteger();
+        private final AtomicBoolean alive = new AtomicBoolean(false);
+
+        RevivingBot() { super(java.net.http.HttpClient.newHttpClient(), "123:ABC"); }
+
+        void revive() { alive.set(true); }
+
+        @Override public String getUpdates(long offset, int timeoutSeconds) throws Exception {
+            if (!alive.get()) {
+                return "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}";
+            }
+            Thread.sleep(20);
+            if (pollsAfterRevival.incrementAndGet() == 4) {
+                return "{\"ok\":true,\"result\":[{\"update_id\":1,\"message\":{\"text\":\"/start\"}}]}";
+            }
+            return "{\"ok\":true,\"result\":[]}";
+        }
+        @Override public String getUpdates(long offset, int timeoutSeconds, List<String> allowed) throws Exception {
+            return getUpdates(offset, timeoutSeconds);
+        }
+    }
+
     private static TelegramBotModule module(TelegramBot bot, String username) {
         return TelegramBotModule.builder("123:ABC", username)
                 .bot(bot)
@@ -173,6 +228,70 @@ class PollFailureBudgetTest {
             survivors = threadNamesContaining(username);
         }
         assertThat(survivors).isEmpty();
+    }
+
+    /**
+     * The reset-on-success under real intermittent failure: three short failing
+     * runs cost less than the budget each, but far more than the budget in total.
+     * Without the reset the clock would never stop, and a bot that is merely
+     * flapping — a competing poller, a DNS blip — would be given up on.
+     */
+    @Test
+    void aBotThatKeepsRecoveringNeverSpendsTheBudget() throws Exception {
+        IntermittentBot bot = new IntermittentBot();
+        CountDownLatch notified = new CountDownLatch(1);
+
+        TelegramBotRunner runner = new TelegramBotRunner(module(bot, "intermittent_bot"), null,
+                Duration.ofMillis(250), (m, failingFor) -> notified.countDown());
+        try {
+            runner.start();
+            // 800ms is over three budgets of continuous running; each unbroken run
+            // of failures is only three 10ms back-offs long
+            assertThat(notified.await(800, TimeUnit.MILLISECONDS)).isFalse();
+            // and the bot really did keep flapping while we waited
+            assertThat(bot.failures.get()).isGreaterThanOrEqualTo(6);
+            assertThat(bot.successes.get()).isGreaterThanOrEqualTo(2);
+        } finally {
+            runner.stop();
+        }
+    }
+
+    /**
+     * A listener may re-register the tenant — Task 5 wires exactly such a callback.
+     * The give-up teardown must then close the pools the dead loop belonged to, not
+     * the volatiles as {@code start()} has just re-pointed them, or it would shut
+     * down the runner it had only just brought back.
+     */
+    @Test
+    void aListenerThatRestartsTheRunnerLeavesItAlive() throws Exception {
+        RevivingBot bot = new RevivingBot();
+        TelegramBotModule module = module(bot, "revived_bot");
+        CountDownLatch handledAfterRestart = new CountDownLatch(1);
+        module.command("/start", u -> handledAfterRestart.countDown());
+        AtomicReference<TelegramBotRunner> holder = new AtomicReference<>();
+        AtomicInteger giveUps = new AtomicInteger();
+
+        TelegramBotRunner runner = new TelegramBotRunner(module, null,
+                Duration.ofMillis(150), (m, failingFor) -> {
+                    // guarded: the restarted runner carries this same listener
+                    if (giveUps.incrementAndGet() == 1) {
+                        bot.revive();
+                        holder.get().start();
+                    }
+                });
+        holder.set(runner);
+        try {
+            runner.start();
+            // the restarted runner still polls...
+            assertThat(handledAfterRestart.await(5, TimeUnit.SECONDS)).isTrue();
+            // ...and still has a live worker pool to run handlers on
+            int before = bot.pollsAfterRevival.get();
+            Thread.sleep(200);
+            assertThat(bot.pollsAfterRevival.get()).isGreaterThan(before);
+            assertThat(giveUps.get()).isEqualTo(1);
+        } finally {
+            runner.stop();
+        }
     }
 
     private static List<String> threadNamesContaining(String fragment) {
