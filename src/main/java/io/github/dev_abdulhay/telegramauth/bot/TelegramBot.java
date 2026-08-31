@@ -114,12 +114,25 @@ public class TelegramBot {
 
     /** @param botUserId Telegram user id of the managed bot, the API's {@code user_id} */
     public String getManagedBotToken(long botUserId) {
-        return postForResult("getManagedBotToken", "user_id=" + botUserId).asText();
+        return requireTextResult("getManagedBotToken", postForResult("getManagedBotToken", "user_id=" + botUserId));
     }
 
     /** Revokes the managed bot's current token and returns the new one. */
     public String replaceManagedBotToken(long botUserId) {
-        return postForResult("replaceManagedBotToken", "user_id=" + botUserId).asText();
+        return requireTextResult("replaceManagedBotToken",
+                postForResult("replaceManagedBotToken", "user_id=" + botUserId));
+    }
+
+    /**
+     * Guards against a malformed {@code ok:true} response whose {@code result} is
+     * missing or not a string — returning it as-is would hand the caller an empty
+     * token to silently persist instead of a real one.
+     */
+    private static String requireTextResult(String method, JsonNode result) {
+        if (!result.isTextual() || result.asText().isBlank()) {
+            throw new TelegramApiException(0, method + " returned a missing or non-string result");
+        }
+        return result.asText();
     }
 
     public JsonNode getManagedBotAccessSettings(long botUserId) {
