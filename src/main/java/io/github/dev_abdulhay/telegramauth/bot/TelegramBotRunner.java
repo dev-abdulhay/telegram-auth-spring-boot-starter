@@ -131,7 +131,11 @@ public class TelegramBotRunner {
                 : null;
         while (running.get()) {
             try {
-                String json = module.getBot().getUpdates(offset.get(), timeoutS, allowed);
+                // the 2-arg overload is called (not 3-arg with a null list) so that hosts/tests
+                // overriding only getUpdates(long, int) — see DemoTgConfig — keep working
+                String json = (allowed != null)
+                        ? module.getBot().getUpdates(offset.get(), timeoutS, allowed)
+                        : module.getBot().getUpdates(offset.get(), timeoutS);
                 long maxId = dispatcher.dispatch(json);
                 if (maxId > 0) {
                     offset.set(maxId + 1);
