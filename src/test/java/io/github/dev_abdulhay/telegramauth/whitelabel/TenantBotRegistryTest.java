@@ -16,7 +16,11 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -29,16 +33,43 @@ class TenantBotRegistryTest {
     private TokenEncryptor encryptor;
     private ManagedBotService managedBots;
     private List<String> built;
+    /** Every {@code QuietBot} the test factory has created, keyed by its token. */
+    private Map<String, QuietBot> quietBots;
 
     /** Never touches the network: both getUpdates overloads block briefly and return empty. */
     static class QuietBot extends TelegramBot {
+        final AtomicInteger polls = new AtomicInteger();
         QuietBot(String token) { super(HttpClient.newHttpClient(), token); }
         @Override public String getUpdates(long offset, int timeoutSeconds) throws Exception {
+            polls.incrementAndGet();
             Thread.sleep(100);
             return "{\"ok\":true,\"result\":[]}";
         }
         @Override public String getUpdates(long offset, int timeoutSeconds, List<String> allowed) throws Exception {
             return getUpdates(offset, timeoutSeconds);
+        }
+    }
+
+    /** Always answers non-ok, so a runner polling it trips its failure budget quickly. */
+    static class FailingBot extends TelegramBot {
+        FailingBot(String token) { super(HttpClient.newHttpClient(), token); }
+        @Override public String getUpdates(long offset, int timeoutSeconds) throws Exception {
+            Thread.sleep(15);
+            return "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}";
+        }
+        @Override public String getUpdates(long offset, int timeoutSeconds, List<String> allowed) throws Exception {
+            return getUpdates(offset, timeoutSeconds);
+        }
+    }
+
+    /** Polls {@code condition} until it is true or {@code timeout} elapses, without pulling in a new dependency. */
+    private static void waitUntil(Duration timeout, BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() >= deadline) {
+                throw new AssertionError("condition not met within " + timeout);
+            }
+            Thread.sleep(20);
         }
     }
 
@@ -52,6 +83,7 @@ class TenantBotRegistryTest {
         store = new InMemoryManagedBotStore();
         encryptor = new AesGcmTokenEncryptor(KEY);
         built = new ArrayList<>();
+        quietBots = new HashMap<>();
         TelegramBotModule manager = TelegramBotModule.builder("999:MANAGER", "manager_bot")
                 .bot(new QuietBot("999:MANAGER")).build();
         managedBots = new ManagedBotService(manager, store, encryptor, new ManagedBotEvents() { },
@@ -70,8 +102,10 @@ class TenantBotRegistryTest {
     private TenantBotRegistry<DemoU, DemoS> registry(ManagedBotCustomizer customizer) {
         return new TenantBotRegistry<>(managedBots, (b, token) -> {
             built.add(b.botUserId() + ":" + token);
+            QuietBot quietBot = new QuietBot(token);
+            quietBots.put(token, quietBot);
             TelegramBotModule m = TelegramBotModule.builder(token, b.username())
-                    .bot(new QuietBot(token))
+                    .bot(quietBot)
                     .botUserId(b.botUserId())
                     .build();
             return new RunningBot<>(m, new StubTenantSessionService(m));
@@ -112,12 +146,16 @@ class TenantBotRegistryTest {
     void stopDeregistersTheBot() {
         ManagedBot b = storedBot(555L, "555:CHILD");
         TenantBotRegistry<DemoU, DemoS> registry = registry(null);
-        registry.start(b);
+        try {
+            registry.start(b);
 
-        registry.stop(555L);
+            registry.stop(555L);
 
-        assertThat(registry.running()).isEmpty();
-        assertThat(registry.sessionServiceFor(555L)).isEmpty();
+            assertThat(registry.running()).isEmpty();
+            assertThat(registry.sessionServiceFor(555L)).isEmpty();
+        } finally {
+            registry.stopAll();
+        }
     }
 
     @Test
@@ -132,6 +170,37 @@ class TenantBotRegistryTest {
 
             assertThat(built).containsExactly("555:555:FIRST", "555:555:SECOND");
             assertThat(registry.running()).containsExactly(555L);
+        } finally {
+            registry.stopAll();
+        }
+    }
+
+    /**
+     * A restart that dropped its {@code stop()} call, or a {@code stop()} that
+     * deregistered without actually stopping the runner, would still pass every
+     * other assertion in this class: the map would show one id, and the factory
+     * would have run twice. The only way to catch a second poller left running on
+     * the old token is to watch that old bot's poll count go silent.
+     */
+    @Test
+    void restartStopsTheOldRunnerBeforeStartingTheNew() throws InterruptedException {
+        ManagedBot b = storedBot(555L, "555:FIRST");
+        TenantBotRegistry<DemoU, DemoS> registry = registry(null);
+        try {
+            registry.start(b);
+            QuietBot firstBot = quietBots.get("555:FIRST");
+            waitUntil(Duration.ofSeconds(2), () -> firstBot.polls.get() > 0);
+            ManagedBot rotated = storedBot(555L, "555:SECOND");
+
+            registry.restart(rotated);
+
+            int countRightAfterRestart = firstBot.polls.get();
+            // Long enough for the old bot to have polled again at least once more
+            // if its runner were still alive; QuietBot polls roughly every 100ms.
+            Thread.sleep(400);
+            assertThat(firstBot.polls.get())
+                    .as("the old runner's poll count must go silent after restart")
+                    .isEqualTo(countRightAfterRestart);
         } finally {
             registry.stopAll();
         }
@@ -163,5 +232,27 @@ class TenantBotRegistryTest {
     @Test
     void sessionServiceForAnUnknownBotIsEmpty() {
         assertThat(registry(null).sessionServiceFor(404L)).isEmpty();
+    }
+
+    @Test
+    void pollFailureBudgetDeregistersTheBot() throws InterruptedException {
+        ManagedBot b = storedBot(555L, "555:CHILD");
+        TenantBotRegistry<DemoU, DemoS> registry = new TenantBotRegistry<>(managedBots, (mb, token) -> {
+            TelegramBotModule m = TelegramBotModule.builder(token, mb.username())
+                    .bot(new FailingBot(token))
+                    .botUserId(mb.botUserId())
+                    .pollingInterval(Duration.ofMillis(10))
+                    .build();
+            return new RunningBot<>(m, new StubTenantSessionService(m));
+        }, null, null, Duration.ofMillis(100));
+        try {
+            registry.start(b);
+
+            waitUntil(Duration.ofSeconds(5), () -> registry.running().isEmpty());
+
+            assertThat(registry.sessionServiceFor(555L)).isEmpty();
+        } finally {
+            registry.stopAll();
+        }
     }
 }
