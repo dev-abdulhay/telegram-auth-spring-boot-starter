@@ -30,18 +30,38 @@ public class TelegramBot {
      */
     private static final Duration SEND_TIMEOUT = Duration.ofSeconds(10);
 
+    /**
+     * Default budget for sitting out a {@code 429}. The wait happens on the caller's
+     * thread — the single update worker that also serves the auth flow — so it is a
+     * ceiling on how long one rate-limited managed-bot call may stall every other
+     * update for.
+     */
+    public static final Duration DEFAULT_MAX_RATE_LIMIT_WAIT = Duration.ofSeconds(60);
+
     private final HttpClient http;
     private final String token;
     private final String baseUrl;
+    private final Duration maxRateLimitWait;
 
     public TelegramBot(HttpClient http, String token) {
         this(http, token, "https://api.telegram.org");
     }
 
     public TelegramBot(HttpClient http, String token, String baseUrl) {
+        this(http, token, baseUrl, DEFAULT_MAX_RATE_LIMIT_WAIT);
+    }
+
+    /**
+     * @param maxRateLimitWait longest {@code retry_after} this bot will wait out
+     *                         in-line; a longer one throws instead of blocking the
+     *                         update worker, leaving the retry to the caller. See
+     *                         {@link #DEFAULT_MAX_RATE_LIMIT_WAIT}.
+     */
+    public TelegramBot(HttpClient http, String token, String baseUrl, Duration maxRateLimitWait) {
         this.http = Objects.requireNonNull(http, "http");
         this.token = Objects.requireNonNull(token, "token");
         this.baseUrl = baseUrl;
+        this.maxRateLimitWait = maxRateLimitWait == null ? DEFAULT_MAX_RATE_LIMIT_WAIT : maxRateLimitWait;
     }
 
     public String getUpdates(long offset, int timeoutSeconds) throws Exception {
@@ -123,8 +143,6 @@ public class TelegramBot {
         }
     }
 
-    /** Telegram's own ceiling for a rate-limit wait we are willing to sit through. */
-    private static final int MAX_RETRY_AFTER_SECONDS = 60;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** @param botUserId Telegram user id of the managed bot, the API's {@code user_id} */
@@ -156,12 +174,17 @@ public class TelegramBot {
 
     /**
      * @param addedUserIds up to 10 users who may access the bot besides its owner;
-     *                     ignored by Telegram when {@code restricted} is false
+     *                     ignored by Telegram when {@code restricted} is false. An
+     *                     <b>empty</b> list clears the allow-list; {@code null}
+     *                     omits the parameter and keeps whatever Telegram has.
      */
     public void setManagedBotAccessSettings(long botUserId, boolean restricted, List<Long> addedUserIds) {
         StringBuilder body = new StringBuilder("user_id=").append(botUserId)
                 .append("&is_access_restricted=").append(restricted);
-        if (addedUserIds != null && !addedUserIds.isEmpty()) {
+        // an EMPTY list is not the same as no list: omitting the parameter makes
+        // Telegram keep the previous allow-list, so clearing one would silently
+        // no-op. Only a null list means "leave it alone".
+        if (addedUserIds != null) {
             StringBuilder json = new StringBuilder("[");
             for (int i = 0; i < addedUserIds.size(); i++) {
                 if (i > 0) json.append(',');
@@ -178,13 +201,23 @@ public class TelegramBot {
      * POSTs and returns the {@code result} node. A 429 is a wait signal rather than
      * a failure: we honour {@code retry_after} once and retry, which is separate
      * from any retry budget the caller keeps.
+     *
+     * <p>Past {@link #DEFAULT_MAX_RATE_LIMIT_WAIT} (or whatever budget this bot was
+     * built with) we throw instead of sleeping. The wait would run on the single
+     * update worker, so a multi-minute {@code retry_after} on one managed-bot call
+     * would stall logins for everyone; failing fast hands the problem to the
+     * caller's retry policy, which can back off off-thread.
      */
     private JsonNode postForResult(String method, String body) {
         JsonNode response = send(method, body);
         Integer retryAfter = rateLimitDelay(response);
         if (retryAfter != null) {
+            if (retryAfter > maxRateLimitWait.toSeconds()) {
+                throw new TelegramApiException(429, method + " is rate-limited for " + retryAfter
+                        + "s, beyond the " + maxRateLimitWait.toSeconds() + "s this bot waits in-line");
+            }
             try {
-                Thread.sleep(Math.min(retryAfter, MAX_RETRY_AFTER_SECONDS) * 1000L);
+                Thread.sleep(retryAfter * 1000L);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new TelegramApiException(429, "interrupted while waiting out a rate limit");
@@ -216,8 +249,6 @@ public class TelegramBot {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new TelegramApiException(0, method + " interrupted");
-        } catch (TelegramApiException e) {
-            throw e;
         } catch (Exception e) {
             throw new TelegramApiException(0, method + " failed: " + e.getClass().getSimpleName());
         }
