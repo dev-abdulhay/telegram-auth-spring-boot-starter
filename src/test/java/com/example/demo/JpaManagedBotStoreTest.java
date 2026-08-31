@@ -8,8 +8,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
 import org.springframework.test.context.TestPropertySource;
 
 import java.time.OffsetDateTime;
@@ -26,15 +24,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * a full {@code @SpringBootTest} with the auto-configuration explicitly enabled
  * and Liquibase/datasource pinned to an in-memory H2 instance.
  *
- * <p>{@code store} is wired as a real Spring bean rather than {@code new}'d
- * directly, so {@link JpaManagedBotTokenStore}'s own {@code @Transactional}
- * annotations are actually proxied — required for {@code deleteByBotUserId},
- * whose derived delete query needs an active transaction to call
- * {@code EntityManager.remove}. (A class-level {@code @Transactional} on this
- * test does not help here: Spring's transactional test support does not pick
- * it up for methods inherited from {@link ManagedBotStoreContract}, only for
- * methods declared directly on this class.) Each test instead cleans the table
- * itself in {@link #cleanUp()} for isolation.
+ * <p>{@code store} is constructed with plain {@code new} — exactly how a host
+ * application would build it — because {@code deleteByBotUserId} now works
+ * without any container-managed proxy around the store itself:
+ * {@link io.github.dev_abdulhay.telegramauth.managedbots.BaseManagedBotRepository#deleteByBotUserId}
+ * carries its own {@code @Transactional}, and {@code repo} (a real Spring Data
+ * bean) honours it regardless of how the caller is wired. Each test cleans the
+ * table itself in {@link #cleanUp()} for isolation, since a class-level
+ * {@code @Transactional} here would not roll back the contract's inherited
+ * test methods anyway (Spring's transactional test support only applies it to
+ * methods declared directly on this class).
  */
 @SpringBootTest(classes = DemoApp.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @TestPropertySource(properties = {
@@ -47,23 +46,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 class JpaManagedBotStoreTest extends ManagedBotStoreContract {
 
-    @TestConfiguration
-    static class StoreConfig {
-        @Bean
-        JpaManagedBotTokenStore<DemoManagedBot> managedBotTokenStore(DemoManagedBotRepository repo) {
-            return new JpaManagedBotTokenStore<>(repo, DemoManagedBot::new);
-        }
-    }
-
     @Autowired
     private DemoManagedBotRepository repo;
 
-    @Autowired
     private ManagedBotTokenStore store;
 
     @BeforeEach
-    void cleanUp() {
+    void setUp() {
         repo.deleteAll();
+        store = new JpaManagedBotTokenStore<>(repo, DemoManagedBot::new);
     }
 
     @Override
@@ -130,5 +121,50 @@ class JpaManagedBotStoreTest extends ManagedBotStoreContract {
         assertThat(found.encryptedToken()).isEqualTo(original.encryptedToken());
         assertThat(found.createdAt()).isEqualToIgnoringNanos(original.createdAt());
         assertThat(found.updatedAt()).isEqualToIgnoringNanos(original.updatedAt());
+    }
+
+    /**
+     * Proves {@link BaseManagedBotRepository#deleteByBotUserId} carries its own
+     * {@code @Transactional} rather than relying on the store being a
+     * container-managed bean. {@code plainStore} here is a throwaway instance
+     * built the same way the shared {@code store} field is (plain {@code new}),
+     * to make the point self-contained: without {@code @Transactional} on the
+     * repository method, this fails with {@code InvalidDataAccessApiUsageException:
+     * No EntityManager with actual transaction available for current thread}
+     * (confirmed by temporarily removing the annotation).
+     */
+    @Test
+    void deleteWorksWhenTheStoreIsPlainlyConstructed() {
+        ManagedBotTokenStore plainStore = new JpaManagedBotTokenStore<>(repo, DemoManagedBot::new);
+        plainStore.save(bot(201L, 9L));
+
+        plainStore.deleteByBotUserId(201L);
+
+        assertThat(plainStore.findByBotUserId(201L)).isEmpty();
+    }
+
+    /**
+     * The {@code if (entity.getBotUserId() == null)} guard in
+     * {@link JpaManagedBotTokenStore#save} is what makes {@code createdAt}
+     * immutable across updates while {@code updatedAt} keeps advancing; nothing
+     * else in this file exercises the UPDATE path for those two fields
+     * together. Confirmed this fails (original {@code createdAt} gets
+     * overwritten) if that guard is temporarily removed.
+     */
+    @Test
+    void createdAtSurvivesAnUpdateWhileUpdatedAtAdvances() {
+        OffsetDateTime originalCreatedAt = OffsetDateTime.now().minusDays(5);
+        OffsetDateTime firstUpdatedAt = OffsetDateTime.now().minusDays(5);
+        store.save(new ManagedBot(101L, "tenant_101_bot", "Tenant 101", 7L, "enc-101",
+                originalCreatedAt, firstUpdatedAt));
+
+        OffsetDateTime differentCreatedAt = OffsetDateTime.now();
+        OffsetDateTime laterUpdatedAt = OffsetDateTime.now().plusMinutes(1);
+        store.save(new ManagedBot(101L, "renamed_bot", "Renamed", 7L, "enc-new",
+                differentCreatedAt, laterUpdatedAt));
+
+        ManagedBot found = store.findByBotUserId(101L).orElseThrow();
+        assertThat(found.createdAt()).isEqualToIgnoringNanos(originalCreatedAt);
+        assertThat(found.updatedAt()).isAfter(firstUpdatedAt);
     }
 }
