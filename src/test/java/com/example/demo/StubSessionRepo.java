@@ -42,6 +42,14 @@ public class StubSessionRepo implements DemoSessionRepository {
                         && s.getExpiresAt() != null && s.getExpiresAt().isAfter(time))
                 .count();
     }
+    @Override public long countByIpAddressAndBotUserIdAndStatusInAndExpiresAtAfter(
+            String ipAddress, Long botUserId, java.util.Collection<BaseAuthSession.Status> statuses, OffsetDateTime time) {
+        return store.values().stream()
+                .filter(s -> ipAddress.equals(s.getIpAddress()) && botUserId.equals(s.getBotUserId())
+                        && statuses.contains(s.getStatus())
+                        && s.getExpiresAt() != null && s.getExpiresAt().isAfter(time))
+                .count();
+    }
     @Override public int deleteByStatusInAndExpiresAtBefore(java.util.Collection<BaseAuthSession.Status> statuses, OffsetDateTime time) {
         List<Long> ids = store.values().stream()
                 .filter(s -> statuses.contains(s.getStatus()) && s.getExpiresAt() != null && s.getExpiresAt().isBefore(time))

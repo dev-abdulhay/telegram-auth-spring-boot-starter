@@ -79,13 +79,13 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
     @Transactional
     public CreatedSession create(String ipAddress, String userAgent) {
         int limit = module.getMaxPendingPerIp();
-        if (limit > 0 && ipAddress != null && !ipAddress.isBlank()
-                && sessionRepo.countByIpAddressAndStatusInAndExpiresAtAfter(
-                        ipAddress, LIVE_STATUSES, OffsetDateTime.now()) >= limit) {
+        Long botUserId = module.getBotUserId();
+        if (limit > 0 && ipAddress != null && !ipAddress.isBlank() && liveForIp(ipAddress, botUserId) >= limit) {
             throw new SessionRateLimitException(ipAddress);
         }
         String raw = tokenGenerator.newToken();
         S s = factory.get();
+        s.setBotUserId(botUserId);
         s.setTokenHash(tokenGenerator.hash(raw));
         s.setIpAddress(ipAddress);
         s.setUserAgent(userAgent);
@@ -94,6 +94,19 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
         s.setStatus(Status.PENDING);
         sessionRepo.save(s);
         return new CreatedSession(raw, s);
+    }
+
+    /**
+     * Live sessions for this IP, scoped to the module's tenant when it has one.
+     * A statically configured module counts across the whole table, which is the
+     * pre-white-label behaviour and must not change.
+     */
+    private long liveForIp(String ipAddress, Long botUserId) {
+        OffsetDateTime now = OffsetDateTime.now();
+        return (botUserId == null)
+                ? sessionRepo.countByIpAddressAndStatusInAndExpiresAtAfter(ipAddress, LIVE_STATUSES, now)
+                : sessionRepo.countByIpAddressAndBotUserIdAndStatusInAndExpiresAtAfter(
+                        ipAddress, botUserId, LIVE_STATUSES, now);
     }
 
     @Transactional(readOnly = true)

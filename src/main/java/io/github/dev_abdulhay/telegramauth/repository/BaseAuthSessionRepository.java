@@ -43,6 +43,16 @@ public interface BaseAuthSessionRepository<S extends BaseAuthSession>
                                                       OffsetDateTime time);
 
     /**
+     * Live sessions for an IP <em>within one tenant bot</em>. A flood against one
+     * tenant must not consume another tenant's quota, even though both share the
+     * table.
+     */
+    long countByIpAddressAndBotUserIdAndStatusInAndExpiresAtAfter(String ipAddress,
+                                                                  Long botUserId,
+                                                                  Collection<BaseAuthSession.Status> statuses,
+                                                                  OffsetDateTime time);
+
+    /**
      * Bulk-deletes old terminal sessions in one statement. A derived
      * {@code deleteBy...} would load every matching row into the persistence
      * context and delete them one by one, which on a large session table is both

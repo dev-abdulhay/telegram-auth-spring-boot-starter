@@ -30,6 +30,7 @@ public final class TelegramBotModule {
     private final Duration pollingInterval;
     private final Duration sessionRetention;
     private final int maxPendingPerIp;
+    private final Long botUserId;
     private final boolean trustProxyHeaders;
     private final int trustedProxyHops;
     private final TelegramAuthApproveHandler approveHandler;
@@ -52,6 +53,7 @@ public final class TelegramBotModule {
         this.pollingInterval = b.pollingInterval;
         this.sessionRetention = b.sessionRetention;
         this.maxPendingPerIp = b.maxPendingPerIp;
+        this.botUserId = b.botUserId;
         this.trustProxyHeaders = b.trustProxyHeaders;
         this.trustedProxyHops = Math.max(1, b.trustedProxyHops);
         this.approveHandler = b.approveHandler;
@@ -148,6 +150,7 @@ public final class TelegramBotModule {
     public Duration getPollingInterval() { return pollingInterval; }
     public Duration getSessionRetention() { return sessionRetention; }
     public int getMaxPendingPerIp() { return maxPendingPerIp; }
+    public Long getBotUserId() { return botUserId; }
     public boolean isTrustProxyHeaders() { return trustProxyHeaders; }
     public int getTrustedProxyHops() { return trustedProxyHops; }
     public TelegramAuthApproveHandler getApproveHandler() { return approveHandler; }
@@ -168,6 +171,7 @@ public final class TelegramBotModule {
         private Duration pollingInterval = Duration.ofSeconds(1);
         private Duration sessionRetention = Duration.ofDays(1);
         private int maxPendingPerIp = 50;
+        private Long botUserId;
         private boolean trustProxyHeaders = false;
         private int trustedProxyHops = 1;
         private TelegramAuthApproveHandler approveHandler = (info, ctx) -> new AuthApproveResult(Map.of());
@@ -201,6 +205,12 @@ public final class TelegramBotModule {
          * window, so tune it against how your users actually reach the app.
          */
         public Builder maxPendingPerIp(int v) { this.maxPendingPerIp = v; return this; }
+        /**
+         * Telegram user id of the managed bot this module drives, or {@code null}
+         * for a statically configured bot. Sessions created through this module
+         * carry it, which is what keeps one tenant's rate limit off another's.
+         */
+        public Builder botUserId(Long v) { this.botUserId = v; return this; }
         /** Trust {@code X-Forwarded-For} when resolving the client IP. Enable only behind a proxy you control. */
         public Builder trustProxyHeaders(boolean v) { this.trustProxyHeaders = v; return this; }
         /**
