@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Managed bots** (`io.github.dev_abdulhay.telegramauth.managedbots`), a
+  separate, opt-in feature independent of the auth flow: a manager bot can
+  create bots on a user's behalf and keep custody of their tokens.
+- `ManagedBotService`: `createLink(suggestedUsername, suggestedName)` builds
+  the `/newbot` deep link; `findToken(botUserId)` reads the decrypted token
+  locally; `rotateToken(botUserId)` revokes and re-stores it;
+  `getAccessSettings(botUserId)` / `setAccessSettings(botUserId, restricted,
+  addedUserIds)` read/write who besides the owner may use the bot;
+  `decommission(botUserId)` revokes the token and forgets the bot locally
+  (Telegram has no method to delete a managed bot, so the bot itself keeps
+  existing under the owner's account); `handleUpdate(update)` processes one
+  `managed_bot` update, fetching the token with retry/backoff before
+  publishing it.
+- `ManagedBotTokenStore` contract with two implementations:
+  `InMemoryManagedBotStore` (map-backed, non-durable) and
+  `JpaManagedBotTokenStore<M extends BaseManagedBot>`, paired with the
+  `@MappedSuperclass BaseManagedBot` and `BaseManagedBotRepository<M>` a host
+  subclasses with its own entity — the auto-configuration does not register a
+  store bean, since only the host knows its entity type.
+- `TokenEncryptor` / default `AesGcmTokenEncryptor`: AES-256-GCM with a fresh
+  random IV per write, stored as `Base64(IV || ciphertext || tag)`. Tokens are
+  never logged and are masked in `toString` (`ManagedBot`, `BaseManagedBot`).
+  Declaring a host `TokenEncryptor` bean (e.g. backed by a KMS or vault)
+  replaces the default and then no encryption key property is needed.
+- `ManagedBotEvents` lifecycle hooks — `onCreated`, `onTokenRotated`,
+  `onTokenFetchFailed`, `onDecommissioned` — each with a no-op default.
+- `TelegramBotModule#onManagedBot(Consumer<JsonNode>)`, a single-slot handler
+  for `managed_bot` updates with the same replace-guard as
+  `onCallbackQuery`/`onContact`/`onText`.
+- Four `TelegramBot` managed-bot API methods: `getManagedBotToken`,
+  `replaceManagedBotToken`, `getManagedBotAccessSettings`,
+  `setManagedBotAccessSettings`; plus `TelegramApiException` (the API's
+  `ok:false` / unrecoverable-status failure) and a `getUpdates(offset,
+  timeoutSeconds, allowedUpdates)` overload.
+- `telegram.managed-bots.*` properties, wired by
+  `TelegramManagedBotsAutoConfiguration` when
+  `telegram.managed-bots.enabled=true`: `encryption-key` (required unless a
+  custom `TokenEncryptor` bean is supplied), `token-fetch-retries` (default
+  3), `token-fetch-backoff` (default 1s, doubling per retry).
+- **Behaviour change once managed bots are enabled on a module:** its poller
+  now sends Telegram an explicit `allowed_updates` list
+  (`["message", "callback_query", "managed_bot"]`), because Telegram's own
+  default list excludes `managed_bot`. A host relying on the default list to
+  observe other update types (e.g. `my_chat_member`) through
+  `module.fallback(...)` will stop receiving them on that module. The
+  library's own auth flow is unaffected — it consumes only `message` and
+  `callback_query`.
+
 ## [0.4.0] - 2026-08-17
 
 Login confirmation moves from "someone tapped a link" to "someone is looking at

@@ -540,6 +540,139 @@ Breaking, in rough order of how likely it is to affect you:
 6. **`Status` gained `AWAITING_CODE`.** No DDL change unless your schema
    constrains the column with a `CHECK` or an enum type.
 
+## Managed bots
+
+A **manager bot** can create other bots on a user's behalf and keep custody of
+their tokens, using the Telegram Bot API's managed-bots methods (a `/newbot`
+deep link, `getManagedBotToken`, `replaceManagedBotToken`,
+`getManagedBotAccessSettings`, `setManagedBotAccessSettings`). It is a
+**separate, opt-in feature** (`telegram.managed-bots.*`, its own namespace,
+its own auto-configuration) that is fully independent of the auth flow
+documented above — a host can enable either alone, both together, or neither.
+
+> **This narrows the update stream once enabled.** As soon as a
+> `managed_bot` handler is registered on a `TelegramBotModule`, that module's
+> poller starts sending Telegram an explicit `allowed_updates` list —
+> `["message", "callback_query", "managed_bot"]` — because Telegram's own
+> default list excludes `managed_bot`. If your host relied on the default list
+> to observe other update types through `module.fallback(...)` (for example
+> `my_chat_member`, to detect that a user blocked the bot), you will stop
+> receiving them on that module once managed bots are enabled on it. The
+> library's own auth flow is unaffected — `DefaultAuthFlow` only ever consumes
+> `message` and `callback_query`. Read this before flipping
+> `telegram.managed-bots.enabled` to `true`.
+
+### Prerequisites
+
+The library cannot turn either of these on — an operator does it in Telegram,
+before any code here runs:
+
+- **Bot Management Mode** must be enabled for the manager bot in the
+  [BotFather Mini App](https://t.me/BotFather).
+- The Telegram user creating a bot through the manager needs the
+  `can_manage_bots` right.
+
+### Configuration
+
+| Property | Default | Purpose |
+|----------|---------|---------|
+| `telegram.managed-bots.enabled` | `false` | Opt-in switch for the whole feature; auto-config stays inert when false. |
+| `telegram.managed-bots.encryption-key` | *(required)* | Base64-encoded 32-byte AES key used to encrypt tokens at rest. Required when the feature is on, unless you supply your own `TokenEncryptor` bean. |
+| `telegram.managed-bots.token-fetch-retries` | `3` | Attempts for `getManagedBotToken` before giving up on a `managed_bot` update. |
+| `telegram.managed-bots.token-fetch-backoff` | `1s` | Delay before the first retry, doubling on each further attempt. |
+
+```yaml
+telegram:
+  managed-bots:
+    enabled: true
+    encryption-key: "BASE64_ENCODED_32_BYTE_KEY"
+    token-fetch-retries: 3
+    token-fetch-backoff: 1s
+```
+
+### Minimal usage
+
+The auto-configuration wires `ManagedBotService` and the update handler, but
+it does **not** register a `ManagedBotTokenStore` bean — only the host knows
+whether that store is JPA-backed (and with which entity) or in-memory, so you
+declare exactly one yourself.
+
+**Option A — JPA**, subclassing `BaseManagedBot` and
+`BaseManagedBotRepository` the same way you subclass `BaseAuthSession`:
+
+```java
+@Entity
+@Table(name = "managed_bot", indexes = @Index(columnList = "owner_user_id"))
+public class TenantBot extends BaseManagedBot {}
+
+public interface TenantBotRepository extends BaseManagedBotRepository<TenantBot> {}
+
+@Bean
+ManagedBotTokenStore managedBotTokenStore(TenantBotRepository repo) {
+    return new JpaManagedBotTokenStore<>(repo, TenantBot::new);
+}
+```
+
+**Option B — in-memory** (tests, or hosts that do not need durability):
+
+```java
+@Bean
+ManagedBotTokenStore managedBotTokenStore() {
+    return new InMemoryManagedBotStore();
+}
+```
+
+Then turn the feature on and create a link:
+
+```java
+String link = managedBotService.createLink("mycompany_sales_bot", "My Company Sales");
+// send `link` to the user; they tap it, confirm/edit the details in Telegram,
+// and the new bot's `managed_bot` update arrives and is handled automatically
+```
+
+React to a new bot by implementing `ManagedBotEvents#onCreated` (every method
+is a no-op default, so implement only what you need):
+
+```java
+@Bean
+ManagedBotEvents managedBotEvents(ManagedBotService managedBotService) {
+    return new ManagedBotEvents() {
+        @Override
+        public void onCreated(ManagedBot bot) {
+            String token = managedBotService.findToken(bot.botUserId()).orElseThrow();
+            // e.g. start a runtime bot instance for bot.botUserId() with this token
+        }
+    };
+}
+```
+
+### Deleting a managed bot
+
+The Bot API exposes **no method to delete a managed bot** — this is a live
+Telegram platform limitation, not a gap in this library. `decommission(long
+botUserId)` does the next best thing: it revokes the current token (discarding
+the replacement Telegram issues) and forgets the bot locally, firing
+`ManagedBotEvents#onDecommissioned`. The bot itself keeps existing under the
+owning user's Telegram account — the user removes it themselves through
+BotFather.
+
+### Security notes
+
+- Tokens are stored **encrypted at rest** — the default `TokenEncryptor` is
+  `AesGcmTokenEncryptor` (AES-256-GCM, a fresh random IV on every write,
+  stored as `Base64(IV || ciphertext || tag)`); a tampered value fails to
+  decrypt rather than returning garbage.
+- Tokens are **never logged** and are **masked in `toString`** — both
+  `ManagedBot` and `BaseManagedBot` print `encryptedToken=***`.
+- **The host owns key custody.** Declaring your own `TokenEncryptor` bean
+  (e.g. delegating to a KMS or vault) replaces the built-in AES-GCM default,
+  and `telegram.managed-bots.encryption-key` is then not needed at all.
+- **A token can go dead at any time** — the owning user can revoke or rotate
+  it from BotFather independently of this library, so your application must
+  tolerate that. When it happens, Telegram delivers another `managed_bot`
+  update and `ManagedBotService` re-fetches and re-stores the token
+  automatically, then calls `onTokenRotated`.
+
 ## Status & roadmap
 
 > **MVP.** Long-polling transport, in-memory per-module event bus, single
