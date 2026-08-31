@@ -25,6 +25,9 @@ class ManagedBotServiceTest {
         final List<String> calls = new ArrayList<>();
         String token = "999:CHILD";
         int failFetches;
+        /** Set by env() so ordering-sensitive fakes can observe the store's state. */
+        ManagedBotTokenStore store;
+        JsonNode accessSettings;
 
         FakeBot() {
             super(HttpClient.newHttpClient(), "123:ABC");
@@ -40,19 +43,52 @@ class ManagedBotServiceTest {
         }
 
         @Override public String replaceManagedBotToken(long botUserId) {
-            calls.add("replace:" + botUserId);
+            // Recording whether the row is still there is what lets a test catch a
+            // reversed decommission() that deletes before revoking.
+            boolean stillStored = store != null && store.findByBotUserId(botUserId).isPresent();
+            calls.add("replace:" + botUserId + ":stillStored=" + stillStored);
             return "999:ROTATED";
+        }
+
+        @Override public JsonNode getManagedBotAccessSettings(long botUserId) {
+            calls.add("getAccess:" + botUserId);
+            return accessSettings;
+        }
+
+        @Override public void setManagedBotAccessSettings(long botUserId, boolean restricted, List<Long> addedUserIds) {
+            calls.add("setAccess:" + botUserId + ":restricted=" + restricted + ":ids=" + addedUserIds);
         }
     }
 
     static class RecordingEvents implements ManagedBotEvents {
         final List<String> events = new ArrayList<>();
-        @Override public void onCreated(ManagedBot bot) { events.add("created:" + bot.botUserId()); }
-        @Override public void onTokenRotated(ManagedBot bot) { events.add("rotated:" + bot.botUserId()); }
+        private final ManagedBotTokenStore store;
+
+        RecordingEvents(ManagedBotTokenStore store) {
+            this.store = store;
+        }
+
+        @Override public void onCreated(ManagedBot bot) {
+            // Recording whether the store already has the row is what lets a test
+            // catch a reversed handleUpdate() that publishes before persisting.
+            events.add("created:" + bot.botUserId() + ":stored=" + isStored(bot));
+        }
+
+        @Override public void onTokenRotated(ManagedBot bot) {
+            events.add("rotated:" + bot.botUserId() + ":stored=" + isStored(bot));
+        }
+
         @Override public void onTokenFetchFailed(long botUserId, long ownerUserId, Exception cause) {
             events.add("failed:" + botUserId);
         }
+
         @Override public void onDecommissioned(long botUserId) { events.add("decommissioned:" + botUserId); }
+
+        private boolean isStored(ManagedBot bot) {
+            return store.findByBotUserId(bot.botUserId())
+                    .map(b -> b.encryptedToken().equals(bot.encryptedToken()))
+                    .orElse(false);
+        }
     }
 
     record Env(FakeBot bot, InMemoryManagedBotStore store, RecordingEvents events,
@@ -62,7 +98,8 @@ class ManagedBotServiceTest {
         FakeBot bot = new FakeBot();
         TelegramBotModule module = TelegramBotModule.builder("123:ABC", "manager_bot").bot(bot).build();
         InMemoryManagedBotStore store = new InMemoryManagedBotStore();
-        RecordingEvents events = new RecordingEvents();
+        bot.store = store;
+        RecordingEvents events = new RecordingEvents(store);
         TokenEncryptor enc = new TokenEncryptor() {
             @Override public String encrypt(String p) { return "ENC(" + p + ")"; }
             @Override public String decrypt(String c) { return c.substring(4, c.length() - 1); }
@@ -91,7 +128,7 @@ class ManagedBotServiceTest {
         assertThat(e.store().findByBotUserId(555L)).get()
                 .extracting(ManagedBot::encryptedToken).isEqualTo("ENC(999:CHILD)");
         assertThat(e.service().findToken(555L)).contains("999:CHILD");
-        assertThat(e.events().events).containsExactly("created:555");
+        assertThat(e.events().events).containsExactly("created:555:stored=true");
     }
 
     @Test
@@ -104,7 +141,7 @@ class ManagedBotServiceTest {
 
         assertThat(e.store().findAll()).hasSize(1);
         assertThat(e.service().findToken(555L)).contains("999:NEW");
-        assertThat(e.events().events).containsExactly("created:555", "rotated:555");
+        assertThat(e.events().events).containsExactly("created:555:stored=true", "rotated:555:stored=true");
     }
 
     @Test
@@ -127,7 +164,7 @@ class ManagedBotServiceTest {
         e.service().handleUpdate(managedBotUpdate(555L, 7L));
 
         assertThat(e.store().findByBotUserId(555L)).isPresent();
-        assertThat(e.events().events).containsExactly("created:555");
+        assertThat(e.events().events).containsExactly("created:555:stored=true");
     }
 
     @Test
@@ -138,7 +175,7 @@ class ManagedBotServiceTest {
 
         assertThat(e.service().rotateToken(555L)).isEqualTo("999:ROTATED");
         assertThat(e.service().findToken(555L)).contains("999:ROTATED");
-        assertThat(e.events().events).containsExactly("rotated:555");
+        assertThat(e.events().events).containsExactly("rotated:555:stored=true");
     }
 
     @Test
@@ -150,7 +187,7 @@ class ManagedBotServiceTest {
         e.service().decommission(555L);
 
         // revoke must happen while we still hold the row; the new token is discarded
-        assertThat(e.bot().calls).containsExactly("replace:555");
+        assertThat(e.bot().calls).containsExactly("replace:555:stillStored=true");
         assertThat(e.store().findByBotUserId(555L)).isEmpty();
         assertThat(e.events().events).contains("decommissioned:555");
     }
@@ -186,6 +223,39 @@ class ManagedBotServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("10");
         assertThat(e.bot().calls).isEmpty();
+    }
+
+    @Test
+    void getAccessSettingsMapsARestrictedResponseWithAddedUsers() throws Exception {
+        Env e = env();
+        e.bot().accessSettings = M.readTree("{\"is_access_restricted\":true,\"added_users\":"
+                + "[{\"id\":10,\"username\":\"alice\",\"first_name\":\"Alice\"}]}");
+
+        BotAccess access = e.service().getAccessSettings(555L);
+
+        assertThat(access.restricted()).isTrue();
+        assertThat(access.addedUsers()).containsExactly(new ManagedBotUser(10L, "alice", "Alice"));
+    }
+
+    @Test
+    void getAccessSettingsTreatsAMissingAddedUsersKeyAsAnOpenEmptyList() throws Exception {
+        Env e = env();
+        e.bot().accessSettings = M.readTree("{\"is_access_restricted\":false}");
+
+        BotAccess access = e.service().getAccessSettings(555L);
+
+        assertThat(access.restricted()).isFalse();
+        assertThat(access.addedUsers()).isEmpty();
+    }
+
+    @Test
+    void setAccessSettingsWithAValidListReachesTheClientWithIdsIntact() {
+        Env e = env();
+        List<Long> ids = List.of(1L, 2L, 3L);
+
+        e.service().setAccessSettings(555L, true, ids);
+
+        assertThat(e.bot().calls).containsExactly("setAccess:555:restricted=true:ids=" + ids);
     }
 
     @Test
