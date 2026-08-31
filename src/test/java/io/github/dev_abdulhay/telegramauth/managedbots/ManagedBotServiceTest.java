@@ -262,4 +262,78 @@ class ManagedBotServiceTest {
     void findTokenIsEmptyForAnUnknownBot() {
         assertThat(env().service().findToken(404L)).isEmpty();
     }
+
+    /**
+     * {@code decommission} revokes by calling {@code replaceManagedBotToken}, which
+     * IS a token change — so Telegram delivers a {@code managed_bot} update for it.
+     * Without the echo guard that update finds an unknown bot, fetches the fresh
+     * working token and re-creates the row we just deleted, making the documented
+     * "left unreachable by us" promise false.
+     */
+    @Test
+    void theEchoOfOurOwnDecommissionDoesNotResurrectTheBot() throws Exception {
+        Env e = env();
+        e.service().handleUpdate(managedBotUpdate(555L, 7L));
+        e.service().decommission(555L);
+        e.events().events.clear();
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L));
+
+        assertThat(e.store().findAll()).isEmpty();
+        assertThat(e.service().findToken(555L)).isEmpty();
+        assertThat(e.events().events).isEmpty();
+    }
+
+    @Test
+    void aRotationAndItsEchoAnnounceExactlyOneRotation() throws Exception {
+        Env e = env();
+        e.service().handleUpdate(managedBotUpdate(555L, 7L));
+        e.events().events.clear();
+
+        e.service().rotateToken(555L);
+        e.service().handleUpdate(managedBotUpdate(555L, 7L));
+
+        assertThat(e.events().events).containsExactly("rotated:555:stored=true");
+    }
+
+    /** The rotation guard is one-shot: the owner's own later rotation still counts. */
+    @Test
+    void anOwnerRotationAfterOursIsStillAnnounced() throws Exception {
+        Env e = env();
+        e.service().handleUpdate(managedBotUpdate(555L, 7L));
+        e.service().rotateToken(555L);
+        e.service().handleUpdate(managedBotUpdate(555L, 7L)); // our echo, swallowed
+        e.events().events.clear();
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L)); // the owner's doing
+
+        assertThat(e.events().events).containsExactly("rotated:555:stored=true");
+    }
+
+    @Test
+    void fetchAndStoreRecoversABotWhoseUpdateHandlingGaveUp() throws Exception {
+        Env e = env();
+        e.bot().failFetches = 5; // more than the 3 configured attempts
+        e.service().handleUpdate(managedBotUpdate(555L, 7L));
+        assertThat(e.store().findByBotUserId(555L)).isEmpty();
+
+        ManagedBot recovered = e.service().fetchAndStore(555L, 7L);
+
+        assertThat(recovered.botUserId()).isEqualTo(555L);
+        assertThat(e.service().findToken(555L)).contains("999:CHILD");
+        assertThat(e.events().events).containsExactly("failed:555", "created:555:stored=true");
+    }
+
+    /** It throws instead of re-publishing onTokenFetchFailed, so recovering from
+     *  inside that callback cannot loop. */
+    @Test
+    void fetchAndStorePropagatesAFailureInsteadOfRepublishingIt() {
+        Env e = env();
+        e.bot().failFetches = 5;
+
+        assertThatThrownBy(() -> e.service().fetchAndStore(555L, 7L))
+                .isInstanceOf(TelegramApiException.class);
+        assertThat(e.store().findByBotUserId(555L)).isEmpty();
+        assertThat(e.events().events).isEmpty();
+    }
 }

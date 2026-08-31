@@ -6,10 +6,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Creates bots on behalf of users and keeps custody of their tokens.
@@ -17,12 +20,45 @@ import java.util.Optional;
  * <p>Telegram offers no way to delete a managed bot, so {@link #decommission(long)}
  * revokes the token and forgets the bot locally; the bot itself keeps existing and
  * stays owned by the user, who removes it through BotFather.
+ *
+ * <p><b>Echoes of our own token changes.</b> {@code replaceManagedBotToken} is
+ * itself a token change, so Telegram sends us a {@code managed_bot} update for
+ * every rotation and decommission we perform. Left alone that update would make
+ * {@link #rotateToken(long)} announce twice and, worse, make {@link #decommission(long)}
+ * re-fetch and re-store the very bot it just forgot. Both are suppressed by a
+ * short-lived record of the changes we initiated ourselves.
+ *
+ * <p>That record is <b>JVM-local and not replicated</b>, like the flow's
+ * pending-login map and {@code CodeStrikeTracker}'s strikes: an echo delivered to
+ * a different instance, or after a restart, is still processed as if the owner had
+ * done it. Single-instance deployments — what this library targets today — are
+ * unaffected.
  */
 public class ManagedBotService {
 
     private static final Logger log = LoggerFactory.getLogger(ManagedBotService.class);
     /** Telegram's ceiling for {@code added_user_ids}. */
     private static final int MAX_ADDED_USERS = 10;
+    /**
+     * How long we keep expecting Telegram's echo of a change we made. Generous
+     * against a lagging poll loop, short enough that a genuine owner-initiated
+     * rotation right after ours is not swallowed.
+     */
+    private static final Duration ECHO_TTL = Duration.ofMinutes(5);
+    /** Hard ceiling on tracked bots, mirroring {@code CodeStrikeTracker}'s bound. */
+    private static final int MAX_ECHOES = 10_000;
+
+    /**
+     * One self-initiated token change we expect Telegram to echo back.
+     *
+     * @param oneShot   {@code true} for a rotation, which produces exactly one echo;
+     *                  {@code false} for a decommission, which must stay suppressed
+     *                  for the whole window so a late echo cannot resurrect the row
+     * @param expiresAt when the entry stops suppressing, whether or not it was used
+     */
+    private record Echo(boolean oneShot, Instant expiresAt) {}
+
+    private final ConcurrentHashMap<Long, Echo> selfInitiated = new ConcurrentHashMap<>();
 
     private final TelegramBotModule module;
     private final ManagedBotTokenStore store;
@@ -57,10 +93,19 @@ public class ManagedBotService {
                 .map(b -> encryptor.decrypt(b.encryptedToken()));
     }
 
-    /** Revokes the current token, stores the replacement, and announces the rotation. */
+    /**
+     * Revokes the current token, stores the replacement, and announces the rotation.
+     *
+     * <p>Telegram echoes this change back as a {@code managed_bot} update; that one
+     * echo is swallowed so the host sees exactly one {@code onTokenRotated}. A later,
+     * genuinely owner-initiated rotation is announced normally.
+     *
+     * @throws IllegalArgumentException if the bot is unknown to the store
+     */
     public String rotateToken(long botUserId) {
         ManagedBot existing = store.findByBotUserId(botUserId).orElseThrow(
                 () -> new IllegalArgumentException("unknown managed bot " + botUserId));
+        expectEcho(botUserId, true);
         String fresh = module.getBot().replaceManagedBotToken(botUserId);
         ManagedBot saved = persist(existing.botUserId(), existing.username(), existing.firstName(),
                 existing.ownerUserId(), fresh, existing.createdAt());
@@ -80,7 +125,8 @@ public class ManagedBotService {
 
     /**
      * @param addedUserIds at most 10 users besides the owner; Telegram ignores them
-     *                     when {@code restricted} is false
+     *                     when {@code restricted} is false. An <b>empty</b> list
+     *                     clears the allow-list; {@code null} leaves it untouched.
      */
     public void setAccessSettings(long botUserId, boolean restricted, List<Long> addedUserIds) {
         if (addedUserIds != null && addedUserIds.size() > MAX_ADDED_USERS) {
@@ -94,8 +140,17 @@ public class ManagedBotService {
      * Revokes the token and forgets the bot. Revocation runs first: deleting the
      * row first would destroy the credentials the revocation needs and leave a bot
      * we can no longer reach. A failed revocation still clears local state.
+     *
+     * <p>Telegram's echo of the revocation is suppressed for {@code ECHO_TTL},
+     * otherwise the incoming update would look like an unknown bot and we would
+     * fetch its brand-new token and re-create the row we just deleted.
+     *
+     * <p><b>Lenient about unknown ids</b> — unlike {@link #rotateToken(long)}, which
+     * throws. That is deliberate: a bot whose token fetch failed exists on Telegram
+     * but has no row here, and {@code decommission} is the only way to revoke it.
      */
     public void decommission(long botUserId) {
+        expectEcho(botUserId, false);
         try {
             module.getBot().replaceManagedBotToken(botUserId);
         } catch (RuntimeException e) {
@@ -112,6 +167,9 @@ public class ManagedBotService {
      * <p>The update says nothing about what changed, so the store decides: an unknown
      * bot is a creation, a known one a rotation. Re-fetching every time makes a
      * re-delivered update harmless.
+     *
+     * <p>Updates that merely echo a change we made ourselves are dropped — see the
+     * class javadoc.
      */
     public void handleUpdate(JsonNode update) {
         JsonNode managed = update.path("managed_bot");
@@ -122,8 +180,11 @@ public class ManagedBotService {
             log.warn("managed_bot update without a bot id, ignoring");
             return;
         }
+        if (swallowEcho(botUserId)) {
+            log.debug("ignoring the managed_bot update echoing our own token change for bot {}", botUserId);
+            return;
+        }
 
-        Optional<ManagedBot> known = store.findByBotUserId(botUserId);
         String token;
         try {
             token = fetchTokenWithRetries(botUserId);
@@ -134,16 +195,101 @@ public class ManagedBotService {
             return;
         }
 
-        ManagedBot saved = persist(botUserId,
+        storeAndAnnounce(botUserId, ownerUserId,
                 botNode.path("username").asText(null),
                 botNode.path("first_name").asText(null),
-                ownerUserId, token,
+                token);
+    }
+
+    /**
+     * Fetches this bot's token from Telegram, stores it and publishes the matching
+     * event — the same work {@link #handleUpdate(JsonNode)} does, without an update.
+     *
+     * <p>This is the <b>recovery entry point</b>. When the fetch behind an update
+     * exhausts its retries, or the process dies after Telegram's offset advanced but
+     * before the handler ran, the bot exists on Telegram with no token stored here
+     * and no update will be re-delivered. Call this from
+     * {@link ManagedBotEvents#onTokenFetchFailed} (after a delay — the failure was
+     * usually rate limiting) or from a reconciliation job.
+     *
+     * <p>Unlike {@code handleUpdate} it <b>throws</b> rather than publishing
+     * {@code onTokenFetchFailed} again, so recovering from inside that callback
+     * cannot loop.
+     *
+     * @param ownerUserId the bot's owner; kept as-is when the bot is already known
+     * @return the stored bot
+     * @throws io.github.dev_abdulhay.telegramauth.bot.TelegramApiException if the
+     *         token could not be fetched after every configured attempt
+     */
+    public ManagedBot fetchAndStore(long botUserId, long ownerUserId) {
+        return storeAndAnnounce(botUserId, ownerUserId, null, null, fetchTokenWithRetries(botUserId));
+    }
+
+    /**
+     * Saves first and publishes second, so a listener calling {@link #findToken(long)}
+     * always finds the token. An unknown bot is a creation, a known one a rotation.
+     *
+     * @param username  {@code null} keeps whatever the store already holds; a
+     *                  {@code managed_bot} update need not carry the field
+     * @param firstName as {@code username}
+     */
+    private ManagedBot storeAndAnnounce(long botUserId, long ownerUserId,
+                                        String username, String firstName, String rawToken) {
+        Optional<ManagedBot> known = store.findByBotUserId(botUserId);
+        ManagedBot saved = persist(botUserId,
+                username != null ? username : known.map(ManagedBot::username).orElse(null),
+                firstName != null ? firstName : known.map(ManagedBot::firstName).orElse(null),
+                ownerUserId, rawToken,
                 known.map(ManagedBot::createdAt).orElse(null));
         if (known.isEmpty()) {
             events.onCreated(saved);
         } else {
             events.onTokenRotated(saved);
         }
+        return saved;
+    }
+
+    /**
+     * Records that we are about to change this bot's token, so Telegram's echo of
+     * that change is not mistaken for the owner's doing. Registered <em>before</em>
+     * the API call: the echo can be in flight before the call even returns.
+     *
+     * @param oneShot suppress a single update (a rotation) rather than every update
+     *                until the entry expires (a decommission)
+     */
+    private void expectEcho(long botUserId, boolean oneShot) {
+        purgeEchoes();
+        evictOldestEchoIfFull(botUserId);
+        selfInitiated.put(botUserId, new Echo(oneShot, Instant.now().plus(ECHO_TTL)));
+    }
+
+    /** @return {@code true} when this update only echoes a change we made ourselves */
+    private boolean swallowEcho(long botUserId) {
+        Echo echo = selfInitiated.get(botUserId);
+        if (echo == null) return false;
+        if (echo.expiresAt().isBefore(Instant.now())) {
+            selfInitiated.remove(botUserId, echo);
+            return false;
+        }
+        if (echo.oneShot()) selfInitiated.remove(botUserId, echo);
+        return true;
+    }
+
+    /** Drops expired entries, so the map cannot grow without bound. */
+    private void purgeEchoes() {
+        if (selfInitiated.isEmpty()) return;
+        Instant now = Instant.now();
+        selfInitiated.entrySet().removeIf(e -> e.getValue().expiresAt().isBefore(now));
+    }
+
+    private void evictOldestEchoIfFull(long incomingBotUserId) {
+        if (selfInitiated.size() < MAX_ECHOES || selfInitiated.containsKey(incomingBotUserId)) return;
+        selfInitiated.entrySet().stream()
+                .min(Comparator.comparing(e -> e.getValue().expiresAt()))
+                .ifPresent(oldest -> {
+                    log.warn("managed-bot echo map at capacity ({}), evicting the oldest entry", MAX_ECHOES);
+                    selfInitiated.remove(oldest.getKey(), oldest.getValue());
+                });
     }
 
     private String fetchTokenWithRetries(long botUserId) {

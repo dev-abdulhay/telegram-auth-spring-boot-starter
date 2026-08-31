@@ -18,6 +18,13 @@ public class JpaManagedBotTokenStore<M extends BaseManagedBot> implements Manage
     private final BaseManagedBotRepository<M> repo;
     private final Supplier<M> factory;
 
+    /**
+     * @param factory makes a <b>blank, unsaved</b> entity — typically a constructor
+     *                reference such as {@code TenantBot::new}. {@code save} uses
+     *                {@code getBotUserId() == null} as its is-new test, so a factory
+     *                that pre-fills {@code botUserId} makes every insert look like an
+     *                update and silently drops {@code createdAt}.
+     */
     public JpaManagedBotTokenStore(BaseManagedBotRepository<M> repo, Supplier<M> factory) {
         this.repo = repo;
         this.factory = factory;
