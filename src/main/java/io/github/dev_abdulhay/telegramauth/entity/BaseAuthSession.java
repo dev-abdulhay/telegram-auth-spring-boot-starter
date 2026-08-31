@@ -48,6 +48,15 @@ public abstract class BaseAuthSession {
     @Column(name = "telegram_user_id")
     private Long telegramUserId;
 
+    /**
+     * The managed bot this session belongs to, or {@code null} for a session
+     * created by a statically configured module. Nullable on purpose: rows
+     * written before white-label existed have no bot, so the column is additive
+     * and needs no backfill.
+     */
+    @Column(name = "bot_user_id")
+    private Long botUserId;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 20)
     private Status status = Status.PENDING;
@@ -88,6 +97,8 @@ public abstract class BaseAuthSession {
     public void setTokenHash(String tokenHash) { this.tokenHash = tokenHash; }
     public Long getTelegramUserId() { return telegramUserId; }
     public void setTelegramUserId(Long telegramUserId) { this.telegramUserId = telegramUserId; }
+    public Long getBotUserId() { return botUserId; }
+    public void setBotUserId(Long botUserId) { this.botUserId = botUserId; }
     public Status getStatus() { return status; }
     public void setStatus(Status status) { this.status = status; }
     public String getIpAddress() { return ipAddress; }
