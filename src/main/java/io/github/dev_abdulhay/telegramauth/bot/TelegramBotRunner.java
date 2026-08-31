@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -40,6 +41,7 @@ public class TelegramBotRunner {
     private static final long WORKER_DRAIN_SECONDS = 5;
 
     private final TelegramBotModule module;
+    private final ThreadFactory threadFactory;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong offset = new AtomicLong(0);
@@ -48,7 +50,19 @@ public class TelegramBotRunner {
     private volatile BotUpdateDispatcher dispatcher;
 
     public TelegramBotRunner(TelegramBotModule module) {
+        this(module, null);
+    }
+
+    /**
+     * @param threadFactory creates the poll and worker threads, or {@code null}
+     *                      for the built-in named daemon threads. A host on
+     *                      Java 21+ passes {@code Thread.ofVirtual().factory()}
+     *                      here; the library itself stays on Java 17 and never
+     *                      references a virtual-thread API.
+     */
+    public TelegramBotRunner(TelegramBotModule module, ThreadFactory threadFactory) {
         this.module = module;
+        this.threadFactory = threadFactory;
     }
 
     public void start() {
@@ -61,19 +75,15 @@ public class TelegramBotRunner {
         ThreadPoolExecutor pool = new ThreadPoolExecutor(
                 1, 1, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(WORKER_QUEUE_CAPACITY),
-                r -> {
-                    Thread t = new Thread(r, "tg-auth-work-" + module.getUsername());
-                    t.setDaemon(true);
-                    return t;
-                },
+                factoryOr("tg-auth-work-" + module.getUsername()),
                 TelegramBotRunner::blockUntilQueued);
+        // started eagerly, not left to the first dispatched update: the worker
+        // thread is part of what start() stands up, so a supplied ThreadFactory
+        // is invoked for it right away rather than only once traffic arrives.
+        pool.prestartCoreThread();
         worker = pool;
         dispatcher = new BotUpdateDispatcher(module, worker);
-        executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "tg-auth-poll-" + module.getUsername());
-            t.setDaemon(true);
-            return t;
-        });
+        executor = Executors.newSingleThreadExecutor(factoryOr("tg-auth-poll-" + module.getUsername()));
         executor.submit(this::loop);
         log.info("Telegram polling started for @{}, token={}", module.getUsername(), module.getBot().maskedToken());
     }
@@ -83,6 +93,20 @@ public class TelegramBotRunner {
         if (executor != null) executor.shutdownNow();
         drainWorker();
         log.info("Telegram polling stopped for @{}", module.getUsername());
+    }
+
+    /**
+     * The supplied factory when there is one, otherwise a named daemon factory.
+     * A supplied factory is used as-is: it owns its threads' names and daemon
+     * status, and forcing {@code setDaemon} on a virtual thread would throw.
+     */
+    private ThreadFactory factoryOr(String name) {
+        if (threadFactory != null) return threadFactory;
+        return r -> {
+            Thread t = new Thread(r, name);
+            t.setDaemon(true);
+            return t;
+        };
     }
 
     /**
