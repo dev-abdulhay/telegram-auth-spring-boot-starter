@@ -97,4 +97,24 @@ class ManagedBotApiTest {
                 .isInstanceOf(TelegramApiException.class)
                 .hasMessageContaining("BOT_NOT_MANAGED");
     }
+
+    @Test
+    void getManagedBotTokenRejectsAnOkTrueResponseWithNoResult() {
+        server.stubFor(post(urlPathEqualTo("/bot123:ABC/getManagedBotToken"))
+                .willReturn(aResponse().withHeader("Content-Type", "application/json")
+                        .withBody("{\"ok\":true}")));
+
+        assertThatThrownBy(() -> bot.getManagedBotToken(555L))
+                .isInstanceOf(TelegramApiException.class);
+    }
+
+    @Test
+    void replaceManagedBotTokenRejectsAnOkTrueResponseWithNoResult() {
+        server.stubFor(post(urlPathEqualTo("/bot123:ABC/replaceManagedBotToken"))
+                .willReturn(aResponse().withHeader("Content-Type", "application/json")
+                        .withBody("{\"ok\":true}")));
+
+        assertThatThrownBy(() -> bot.replaceManagedBotToken(555L))
+                .isInstanceOf(TelegramApiException.class);
+    }
 }
