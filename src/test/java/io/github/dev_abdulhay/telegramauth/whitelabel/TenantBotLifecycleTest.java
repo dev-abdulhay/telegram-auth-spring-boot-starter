@@ -16,11 +16,13 @@ class TenantBotLifecycleTest {
         final List<Long> started = new ArrayList<>();
         final List<Long> stopped = new ArrayList<>();
         long failFor = -1;
+        long failForWithError = -1;
 
         RecordingRegistry() { super(null, null, null, null, null); }
 
         @Override public void start(ManagedBot bot) {
             if (bot.botUserId() == failFor) throw new IllegalStateException("cannot decrypt");
+            if (bot.botUserId() == failForWithError) throw new AssertionError("cannot decrypt");
             started.add(bot.botUserId());
         }
         @Override public void stopAll() { stopped.addAll(started); }
@@ -53,6 +55,17 @@ class TenantBotLifecycleTest {
         new TenantBotLifecycle<>(storeWith(1L, 2L, 3L), registry, true).startAll();
 
         // 2 blew up; 1 and 3 must still be running
+        assertThat(registry.started).containsExactlyInAnyOrder(1L, 3L);
+    }
+
+    @Test
+    void oneTenantThrowingAnErrorDoesNotStopTheRest() {
+        RecordingRegistry registry = new RecordingRegistry();
+        registry.failForWithError = 2L;
+
+        new TenantBotLifecycle<>(storeWith(1L, 2L, 3L), registry, true).startAll();
+
+        // 2 blew up with an Error; 1 and 3 must still be running
         assertThat(registry.started).containsExactlyInAnyOrder(1L, 3L);
     }
 
