@@ -1,8 +1,13 @@
 # Managed Bots — design
 
 **Date:** 2026-08-31
-**Branch:** `feat/managed-bots`
+**Branch:** `feat/managed-bots`, cut from `fix/auth/flow/security-hardening` (v0.4.0)
 **Status:** approved design, not yet implemented
+
+**Base dependency:** this builds on the v0.4.0 work, which is still awaiting its
+merge into `dev`/`main`. It relies on `TelegramBotModule#claimSlot` (single-slot
+handler guard) and the response-reading `TelegramBot#post` path introduced there,
+so it must merge *after* v0.4.0.
 
 ## Why
 
