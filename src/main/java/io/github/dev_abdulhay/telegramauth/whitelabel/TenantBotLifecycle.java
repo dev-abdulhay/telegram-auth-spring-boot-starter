@@ -53,9 +53,14 @@ public class TenantBotLifecycle<U extends BaseTelegramUser, S extends BaseAuthSe
             try {
                 registry.start(bot);
                 ok++;
-            } catch (RuntimeException e) {
+            } catch (Throwable t) {
+                // Throwable, not RuntimeException: this runs from an ApplicationReadyEvent
+                // listener, so letting an Error escape here would abort Spring's remaining
+                // startup dispatch and, thanks to the compareAndSet above, permanently wedge
+                // startAll() into a no-op for every tenant after the failure point. See
+                // TelegramBotRunner.announceGiveUp for the same pattern.
                 log.warn("could not restore tenant bot {}; continuing with the rest",
-                        bot.botUserId(), e);
+                        bot.botUserId(), t);
             }
         }
         log.info("tenant bots restored: {} of {}", ok, bots.size());
