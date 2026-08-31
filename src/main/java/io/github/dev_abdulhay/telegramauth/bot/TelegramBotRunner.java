@@ -77,10 +77,6 @@ public class TelegramBotRunner {
                 new LinkedBlockingQueue<>(WORKER_QUEUE_CAPACITY),
                 factoryOr("tg-auth-work-" + module.getUsername()),
                 TelegramBotRunner::blockUntilQueued);
-        // started eagerly, not left to the first dispatched update: the worker
-        // thread is part of what start() stands up, so a supplied ThreadFactory
-        // is invoked for it right away rather than only once traffic arrives.
-        pool.prestartCoreThread();
         worker = pool;
         dispatcher = new BotUpdateDispatcher(module, worker);
         executor = Executors.newSingleThreadExecutor(factoryOr("tg-auth-poll-" + module.getUsername()));
