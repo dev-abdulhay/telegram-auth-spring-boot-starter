@@ -44,8 +44,13 @@ public class TenantBotEventBridge<U extends BaseTelegramUser, S extends BaseAuth
     private void guard(String action, long botUserId, Runnable body) {
         try {
             body.run();
-        } catch (RuntimeException e) {
-            log.warn("could not {} tenant bot {}", action, botUserId, e);
+        } catch (Throwable t) {
+            // Throwable, not RuntimeException: this runs on the manager bot's update
+            // worker thread, and an Error escaping here (e.g. AssertionError from a
+            // host callback, or NoClassDefFoundError) would surface as an uncaught
+            // exception on that thread instead of the warning this guard exists to
+            // produce. See TelegramBotRunner.announceGiveUp for the same pattern.
+            log.warn("could not {} tenant bot {}", action, botUserId, t);
         }
     }
 }
