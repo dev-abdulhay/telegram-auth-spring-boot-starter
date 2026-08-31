@@ -7,7 +7,7 @@
 
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.4.0</version>
     <packaging>jar</packaging>
 
     <name>telegram-auth-spring-boot-starter</name>
@@ -120,6 +120,18 @@
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            wiremock-jetty12 (not plain `wiremock`), so its Jetty stack matches the
+            Jetty 12 Spring Boot's BOM manages — avoids a split Jetty version stack
+            in this pom's own dependency tree and in any host that imports this pom
+            as a BOM. Not managed by the Spring Boot BOM, so the version is pinned.
+        -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-jetty12</artifactId>
+            <version>3.9.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

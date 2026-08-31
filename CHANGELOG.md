@@ -7,11 +7,278 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Managed bots** (`io.github.dev_abdulhay.telegramauth.managedbots`), a
+  separate, opt-in feature independent of the auth flow: a manager bot can
+  create bots on a user's behalf and keep custody of their tokens.
+- `ManagedBotService`: `createLink(suggestedUsername, suggestedName)` builds
+  the `/newbot` deep link; `findToken(botUserId)` reads the decrypted token
+  locally; `rotateToken(botUserId)` revokes and re-stores it;
+  `getAccessSettings(botUserId)` / `setAccessSettings(botUserId, restricted,
+  addedUserIds)` read/write who besides the owner may use the bot;
+  `decommission(botUserId)` revokes the token and forgets the bot locally
+  (Telegram has no method to delete a managed bot, so the bot itself keeps
+  existing under the owner's account); `handleUpdate(update)` processes one
+  `managed_bot` update, fetching the token with retry/backoff before
+  publishing it;
+  `fetchAndStore(botUserId, ownerUserId)` does the same work without an
+  update — the recovery entry point for a bot that exists on Telegram with no
+  token stored here (retries exhausted, or the process died after the poller
+  advanced Telegram's offset). It throws instead of re-publishing
+  `onTokenFetchFailed`, so recovering from inside that callback cannot loop.
+- `TelegramBot.DEFAULT_MAX_RATE_LIMIT_WAIT` (60s) and a
+  `TelegramBot(HttpClient, token, baseUrl, maxRateLimitWait)` constructor: the
+  longest `retry_after` a bot will sit out in-line. The wait runs on the
+  module's single update worker, so beyond the budget the call now throws
+  `TelegramApiException` instead of stalling every other update — including
+  logins — for minutes. Previously hardcoded at 60s with no way to lower it.
+- `ManagedBotTokenStore` contract with two implementations:
+  `InMemoryManagedBotStore` (map-backed, non-durable) and
+  `JpaManagedBotTokenStore<M extends BaseManagedBot>`, paired with the
+  `@MappedSuperclass BaseManagedBot` and `BaseManagedBotRepository<M>` a host
+  subclasses with its own entity — the auto-configuration does not register a
+  store bean, since only the host knows its entity type.
+- `TokenEncryptor` / default `AesGcmTokenEncryptor`: AES-256-GCM with a fresh
+  random IV per write, stored as `Base64(IV || ciphertext || tag)`. Tokens are
+  never logged and are masked in `toString` (`ManagedBot`, `BaseManagedBot`).
+  Declaring a host `TokenEncryptor` bean (e.g. backed by a KMS or vault)
+  replaces the default and then no encryption key property is needed.
+- `ManagedBotEvents` lifecycle hooks — `onCreated`, `onTokenRotated`,
+  `onTokenFetchFailed`, `onDecommissioned` — each with a no-op default.
+- `TelegramBotModule#onManagedBot(Consumer<JsonNode>)`, a single-slot handler
+  for `managed_bot` updates with the same replace-guard as
+  `onCallbackQuery`/`onContact`/`onText`.
+- Four `TelegramBot` managed-bot API methods: `getManagedBotToken`,
+  `replaceManagedBotToken`, `getManagedBotAccessSettings`,
+  `setManagedBotAccessSettings`; plus `TelegramApiException` (the API's
+  `ok:false` / unrecoverable-status failure) and a `getUpdates(offset,
+  timeoutSeconds, allowedUpdates)` overload.
+- `telegram.managed-bots.*` properties, wired by
+  `TelegramManagedBotsAutoConfiguration` when
+  `telegram.managed-bots.enabled=true`: `encryption-key` (required unless a
+  custom `TokenEncryptor` bean is supplied), `token-fetch-retries` (default
+  3), `token-fetch-backoff` (default 1s, doubling per retry).
+- **Behaviour change once managed bots are enabled on a module:** its poller
+  now sends Telegram an explicit `allowed_updates` list
+  (`["message", "callback_query", "managed_bot"]`), because Telegram's own
+  default list excludes `managed_bot`. A host relying on the default list to
+  observe other update types (e.g. `my_chat_member`) through
+  `module.fallback(...)` will stop receiving them on that module. The
+  library's own auth flow is unaffected — it consumes only `message` and
+  `callback_query`.
+
+### Fixed
+- `ManagedBotService.decommission(botUserId)` no longer resurrects the bot it
+  just decommissioned. Revoking a token *is* a token change, so Telegram
+  echoed it back as a `managed_bot` update; that update found an unknown bot,
+  fetched the brand-new working token, re-created the row and fired
+  `onCreated` — making the documented "left unreachable by us" promise false.
+  The service now keeps a bounded, 5-minute, JVM-local record of the token
+  changes it initiated and drops their echoes.
+- `ManagedBotService.rotateToken(botUserId)` publishes `onTokenRotated` once
+  instead of twice, via the same guard. The rotation suppression is one-shot,
+  so a genuinely owner-initiated rotation arriving later is still announced.
+- `setManagedBotAccessSettings` / `ManagedBotService.setAccessSettings` can
+  now clear an allow-list. An empty `addedUserIds` list omitted the parameter
+  entirely, and Telegram then kept the previous list — an access revocation
+  that silently did nothing. An empty list now transmits `added_user_ids=[]`;
+  only `null` omits the parameter.
+- The poller's `allowed_updates` list is recomputed on every long-poll
+  iteration instead of once before the loop. A host whose polling started
+  before the auto-configured `ManagedBotUpdateHandler` singleton was built
+  pinned the list to `null` forever, so `managed_bot` was never requested —
+  no error, no log, the feature silently dead.
+- `JpaManagedBotTokenStore`'s `Supplier<M> factory` contract is documented: it
+  must return a blank, unsaved entity, because `save` uses
+  `getBotUserId() == null` as its is-new test.
+
+## [0.4.0] - 2026-08-17
+
+Login confirmation moves from "someone tapped a link" to "someone is looking at
+the browser that started this login".
+
+### Added
+- **Number matching** (`DefaultAuthFlow.Options.codeConfirmation`, default
+  `BUTTON`): the browser shows a 2-digit code and the bot asks for it, either as
+  an inline keyboard of candidates (`BUTTON`) or as typed text (`TYPED`); `OFF`
+  restores the 0.3.x behaviour. A wrong answer never invites a retry — `BUTTON`
+  ends the login on the first miss, `TYPED` allows three of a hundred
+  candidates — and every wrong answer is logged at `WARN`.
+- New non-terminal session status `AWAITING_CODE`, with
+  `AbstractSessionService.awaitCode(tokenHash)` performing the
+  `PENDING → AWAITING_CODE` transition. It does **not** call the host
+  `approveHandler`, which stays reserved for the final approval.
+- **Per-user cooldown** after a login dies at the code step
+  (`codeCooldown` 5 min, doubling up to `codeCooldownMax` 1 h once
+  `codeCooldownThreshold` — default 1 — failed logins accumulate; a successful
+  login clears the ladder). Rejecting the session alone is no obstacle: the
+  attacker simply opens another one. All attempts of a single `TYPED` login
+  count as one strike; ❌ is never blocked by a cooldown.
+- `ConfirmCodeGenerator` + default `ConfirmCode` (first two bytes of the token
+  hash, modulo 100), pluggable via `TelegramBotModule.Builder#confirmCodeGenerator`.
+  The code is derived, never stored — no new column, no migration.
+- `TelegramBotModule#onText(Consumer<JsonNode>)`, a single-slot handler for text
+  updates that matched no command. `BotUpdateDispatcher` routing order is now
+  `callback_query` → commands → `contact` → `text` → `fallback`; an
+  unregistered `/command` reaches the text handler, and `DefaultAuthFlow`
+  forwards everything it does not own to the module fallback.
+- `GET /session/{token}/poll?since=` — `since=PENDING` opts into the code step
+  and answers `202 { status:"AWAITING_CODE", confirmCode }`;
+  `since=AWAITING_CODE` waits for a terminal state, which is what stops a client
+  from busy-looping on the state it is already in. Omitting `since` keeps the
+  0.3.x terminal-only contract, answering a mid-poll code transition with `204`.
+- Flow options are bindable from `telegram.auth.flow.*`, with optional per-type
+  overrides under `telegram.auth.flows.<name>.*` falling back to `flow` and then
+  to the built-in defaults. The starter auto-configures a
+  `DefaultAuthFlow.Options` bean; declaring your own replaces it.
+- `Options.codeButtons` (3–10, default 3), `maxCodeAttempts` (0 = per-mode
+  default), `effectiveMaxCodeAttempts()`, and overridable
+  `DefaultAuthFlow#codeChoices(int, int)` / `#formatCode(int)` /
+  `#sessionDetails(S, String)`.
+- `FlowMessages` keys `CONFIRM_WARNING`, `CONFIRM_STEP_DONE`,
+  `CODE_PROMPT_BUTTON`, `CODE_PROMPT_TYPED`, `CODE_WRONG`, `CODE_NOT_A_NUMBER`,
+  `CODE_ATTEMPTS_EXHAUSTED`, `TOO_MANY_ATTEMPTS` — all in uz/ru/en. Every
+  confirmation question now ends with a warning that nobody should ever ask the
+  user to tap ✅.
+
+### Changed
+- **Registration moved to the last confirmation.** The user row was created when
+  ✅ was pressed; with a code step configured, ✅ only unlocks the number
+  question, so a login phished or abandoned at the code step no longer leaves an
+  `ACTIVE` account behind.
+- `AWAITING_CODE` sessions hold their per-IP rate-limit slot and are swept to
+  `EXPIRED` alongside `PENDING`. Counting only `PENDING` would have let an
+  attacker park sessions at the code step to bypass `maxPendingPerIp`, and
+  sweeping only `PENDING` would have left half-finished logins alive forever.
+  `TERMINAL_STATUSES` is deliberately unchanged — it drives the retention purge,
+  which must never delete a live session.
+- `AuthEventBus` no longer promises "terminal events only": dispatch still
+  removes the listener, so one subscription observes exactly one event, but
+  `AWAITING_CODE` is non-terminal and the client re-subscribes on its next poll.
+  `InMemoryAuthEventBus` behaviour is unchanged.
+- `DELETE /session/{token}` now also cancels a session sitting at
+  `AWAITING_CODE`.
+- `sessionTtl` default `3m` → `5m`; the contact and code steps share that window.
+
+### Fixed
+- The confirmation-code guess re-checks the user's `BLOCKED` status. The entry
+  checks run before the code question is asked — and the `TYPED` text path had
+  no entry check at all — so a user blocked *mid-flow* (while the code question
+  was on screen) could still complete the login. `handleGuess` now answers
+  `ACCESS_DENIED` for a blocked user in both `BUTTON` and `TYPED` modes.
+
+### Breaking
+- `codeConfirmation` defaults to `BUTTON`, so `Options.defaults()` and the
+  3-argument `DefaultAuthFlow` constructor change behaviour. Opt out with
+  `.codeConfirmation(CodeConfirmation.OFF)` or
+  `telegram.auth.flow.code-confirmation: OFF`.
+- `WaitResponse` is now `(String status, Map payload, Integer confirmCode)`. The
+  2-argument constructor remains and `confirmCode` is omitted from the JSON when
+  null, so existing clients are unaffected.
+- `BaseAuthSessionRepository.findByStatusAndExpiresAtBefore` →
+  `findByStatusInAndExpiresAtBefore(Collection<Status>, OffsetDateTime)`, and
+  `countByIpAddressAndStatusAndExpiresAtAfter` →
+  `countByIpAddressAndStatusInAndExpiresAtAfter(String, Collection<Status>, OffsetDateTime)`.
+- `AuthEvent.Type` gained `AWAITING_CODE`; an exhaustive `switch` needs a branch.
+- `BaseAuthSession.Status` gained `AWAITING_CODE`. No DDL change is required —
+  it fits the existing `VARCHAR(20)` — unless the column is constrained by a
+  `CHECK` or an enum type.
+- `AbstractSessionService.approve` / `reject` now accept a session in
+  `AWAITING_CODE` as well as `PENDING`. Step ordering is the flow's
+  responsibility, so a host calling `approve` directly still bypasses the code
+  step by design.
+
+## [0.3.0] - 2026-08-09
+
+### Added
+- **Contact-share + inline approve/reject** (opt-in, non-breaking):
+  `DefaultAuthFlow.Options` with `requireContact` (soft phone request via
+  Telegram contact-share, `/skip` allowed, spoofed contacts refused) and
+  `requireApproval` (inline ✅/❌ confirmation instead of auto-approve —
+  strongly recommended: auto-approve is phishable). Both default to `false`.
+- `FlowMessages`: built-in bot texts in `uz` (default) / `ru` / `en`, resolved
+  from Telegram `language_code`; override `DefaultAuthFlow#msg` to customise.
+- `TelegramBot`: `sendMessage(chatId, text, replyMarkupJson)`,
+  `answerCallbackQuery(id, text)`, `editMessageText(chatId, messageId, text)`;
+  non-2xx responses are now logged.
+- `TelegramBotModule`: `onCallbackQuery(...)` / `onContact(...)` handler hooks
+  and builder options `sessionRetention` (default 1 day; the sweeper now
+  deletes terminal sessions older than this), `maxPendingPerIp` (default 50;
+  `POST /session` returns `429 Too Many Requests` beyond it),
+  `trustProxyHeaders` (default `false`) and `trustedProxyHops` (default 1 —
+  how many trusted proxies sit between the client and the app).
+- `BaseAuthSession.approvePayload` (`approve_payload VARCHAR(4000)`, nullable):
+  the approve payload is persisted as JSON, so a poll arriving after approval
+  still receives it (previously it was delivered only to a live long-poll and
+  could be lost forever). Existing schemas:
+  `ALTER TABLE <session_table> ADD COLUMN approve_payload VARCHAR(4000);`
+- `BaseAuthSessionRepository`: `findWithLockByTokenHash` (pessimistic lock),
+  `countByIpAddressAndStatusAndExpiresAtAfter`, `deleteByStatusInAndExpiresAtBefore`
+  (a `@Modifying` JPQL bulk delete returning `int`, not a derived query — a
+  derived `deleteBy…` would load every matching row into the persistence context
+  and delete them one at a time during the scheduled sweep).
+  The per-IP count ignores overdue sessions, so a caller is never locked out
+  while waiting for the sweeper to mark them `EXPIRED`.
+  **Index `ip_address` on your session table** — the per-IP count runs on every
+  session creation, so without one `POST /session` full-scans the table:
+  `@Table(name = "…", indexes = @Index(columnList = "ip_address,status"))`.
+
 ### Added (BREAKING for existing schemas)
 - `BaseAuthSession.updatedAt` (`updated_at` column, `NOT NULL`) with the same
   `@PreUpdate` refresh behaviour as `BaseTelegramUser`. Hosts with existing
   session tables must add the column, e.g.
   `ALTER TABLE <session_table> ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();`
+
+### Changed (BREAKING)
+- `AbstractSessionService.approve(...)` and `reject(...)` now return `boolean`
+  (`false` when the session is missing, already terminal, or expired) and take
+  a row lock, so concurrent approve/reject calls can no longer double-fire the
+  host `approveHandler`. Hosts overriding these methods must update signatures.
+- Auth events are published **after the DB transaction commits** — a client can
+  no longer observe an `APPROVED` event whose transaction later rolled back.
+- `X-Forwarded-For` is no longer trusted by default when resolving the client
+  IP; opt in with `trustProxyHeaders(true)` when running behind a proxy. When
+  trusted, the client entry is counted `trustedProxyHops` positions from the
+  **right** — each trusted hop appends the peer it received from, and everything
+  further left is client-supplied and can be forged to bypass `maxPendingPerIp`.
+  A header with fewer entries than the configured hop count is ignored in favour
+  of the socket address.
+- `TelegramBotModule.onCallbackQuery(...)` / `onContact(...)` now throw
+  `IllegalStateException` when a second handler is registered instead of
+  silently replacing the first (re-registering the *same* handler stays a
+  no-op). A host that registered its own callback handler alongside
+  `requireApproval(true)` used to disable login approval with no error anywhere;
+  route your own updates through `fallback(...)`, which the flow already
+  forwards everything outside its `tgauth:` namespace to.
+- An approve payload that does not fit `approve_payload` (4000 chars) is no
+  longer written to the row — it is logged and delivered via the live event
+  only, instead of failing the whole approve transaction.
+- `AbstractTelegramUserService.register(...)` never re-activates a `BLOCKED`
+  user (returns the user unchanged), and a `null`/blank phone no longer erases
+  a previously stored phone. `DefaultAuthFlow` denies `BLOCKED` users with a
+  localized "access denied" message.
+- `DefaultAuthFlow` handlers accept **private chats only** (`chat.id ==
+  from.id`). A `/start` deep link pasted into a group used to register the
+  *group id* as a Telegram user and approve the session for it; with
+  `requireApproval` the inline ✅ landed in the group where any member could
+  tap it and approve someone else's browser session under their own account.
+  Group/channel updates are now ignored, and a `tgauth:` callback arriving from
+  any chat other than the presser's own is refused.
+- With `requireApproval`, the user is registered when ✅ is pressed instead of
+  on `/start`, so a rejected or abandoned login no longer leaves an `ACTIVE`
+  account behind. A phone collected in the contact step is carried to that
+  moment and saved with it.
+- The inline confirmation now shows the session's IP and user-agent
+  (`FlowMessages.Key.CONFIRM_DETAILS`), so the user can distinguish their own
+  sign-in from one a phisher started for them. Override
+  `DefaultAuthFlow#confirmPrompt(S, String)` to change the wording or layout.
+- `DefaultAuthFlow` forwards updates it does not own to the module `fallback`
+  (`callback_data` outside the `tgauth:` namespace, contacts with no login in
+  progress) instead of dropping them, so a host can keep its own inline
+  keyboards while the flow owns `onCallbackQuery` / `onContact`.
+- `protected void proceedAfterIdentity(...)` changed signature to
+  `(long userId, JsonNode from, String rawToken, String phone, String lang)` —
+  it now owns registration. Subclasses overriding it must update.
 
 ### Removed (BREAKING)
 - `externalUserId` field (and `external_user_id` column mapping) from
@@ -20,9 +287,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mapping in their subclass entity.
 
 ### Fixed
+- `sendMessage` / `answerCallbackQuery` / `editMessageText` now carry a 10 s
+  request timeout. Only `getUpdates` had one, so a single stalled connection
+  pinned the new single-threaded dispatcher worker indefinitely and the bot
+  stopped answering **every** user, not just the one being messaged.
+- The dispatcher's worker queue is bounded (100) and a full queue blocks the
+  poll thread until a slot frees, so a slow handler throttles polling instead of
+  buffering an unbounded backlog of updates whose offsets the next poll would
+  confirm to Telegram. Blocking rather than running the overflow inline
+  (`CallerRunsPolicy`) keeps handler execution single-threaded and in arrival
+  order under load. `TelegramBotRunner.stop()` drains that queue (5 s) before
+  forcing threads down, instead of discarding queued updates outright.
+- `BotUpdateDispatcher.dispatch(...)` no longer collapses the whole batch to
+  `-1` when routing one update fails. The offset stayed put, so Telegram
+  re-delivered the entire batch and every handler in it ran a second time; only
+  an unparseable or non-`ok` response signals back-off now.
+- `requireApproval` builds `callback_data` as `tgauth:<action>:<rawToken>` and
+  now fails fast with an `IllegalStateException` when that exceeds Telegram's
+  64-byte limit. Previously the API silently rejected the keyboard (logged as a
+  non-2xx warning) and the user saw nothing. The built-in 43-char token leaves
+  6 bytes of headroom; a custom `TokenGenerator` must stay inside it.
+- `maxPendingPerIp` is documented as **best-effort**: the count and the insert
+  are not atomic, so a simultaneous burst from one IP can land a few rows over
+  the limit. Use a gateway/WAF rate limiter for an exact ceiling. Its default is
+  50 rather than 10, which was low enough to `429` legitimate users sharing one
+  address (office NAT, carrier CGNAT, a CDN egress IP).
+- `DefaultAuthFlow`'s parked-login map is swept on every park, not only on
+  `/start`, and is capped at 10 000 entries (oldest evicted) so abandoned logins
+  cannot grow it without bound. Its JVM-local, non-replicated nature is now
+  documented: `✅`/`❌` survive a restart because the token travels in the
+  callback and the session lives in the DB, but a pending contact-share or
+  `/skip` does not.
 - `BaseTelegramUser.updatedAt` now refreshes automatically on every entity
   update via a JPA `@PreUpdate` callback (previously it was only set once at
   creation and never changed).
+- Poll endpoint race: the event-bus subscription is now registered **before**
+  the final DB status check, so an approval landing in that window is never
+  missed by the waiting client.
+- Polling loop no longer hammers the Telegram API without a pause when
+  `getUpdates` returns a non-ok response (invalid token, 409 from a competing
+  poller) — it now backs off by `pollingInterval`.
+- Update handlers now run on a dedicated single worker thread per bot instead
+  of the polling thread, so a slow handler no longer stalls update fetching
+  (ordering is preserved).
 
 ## [0.2.0] - 2026-06-20
 
