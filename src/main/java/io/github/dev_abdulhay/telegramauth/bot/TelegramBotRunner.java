@@ -126,11 +126,16 @@ public class TelegramBotRunner {
 
     private void loop() {
         int timeoutS = (int) module.getPollingTimeout().toSeconds();
-        List<String> allowed = module.getManagedBotHandler() != null
-                ? List.of("message", "callback_query", "managed_bot")
-                : null;
         while (running.get()) {
             try {
+                // recomputed every iteration, not snapshotted before the loop: the
+                // managed_bot handler is registered by a singleton the container may
+                // build after start(), and a snapshot would then pin allowed_updates
+                // to null forever — managed_bot silently never requested. One extra
+                // getter call per long poll is free next to the poll itself.
+                List<String> allowed = module.getManagedBotHandler() != null
+                        ? List.of("message", "callback_query", "managed_bot")
+                        : null;
                 // the 2-arg overload is called (not 3-arg with a null list) so that hosts/tests
                 // overriding only getUpdates(long, int) — see DemoTgConfig — keep working
                 String json = (allowed != null)
