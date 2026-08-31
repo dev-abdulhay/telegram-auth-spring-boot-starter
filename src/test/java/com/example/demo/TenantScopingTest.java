@@ -56,4 +56,19 @@ class TenantScopingTest {
         assertThatThrownBy(() -> staticModule.create("1.2.3.4", "ua"))
                 .isInstanceOf(SessionRateLimitException.class);
     }
+
+    @Test
+    void aStaticModuleCountsRowsFromEveryTenant() {
+        StubSessionRepo shared = new StubSessionRepo();
+        DemoSessionService tenantA = serviceFor(555L, shared);
+        DemoSessionService staticModule = serviceFor(null, shared);
+
+        tenantA.create("1.2.3.4", "ua");
+        tenantA.create("1.2.3.4", "ua");
+
+        // the static module's limit is 2 and the table already holds 2 live rows on
+        // this IP — a global count must refuse, a null-scoped count would allow
+        assertThatThrownBy(() -> staticModule.create("1.2.3.4", "ua"))
+                .isInstanceOf(SessionRateLimitException.class);
+    }
 }
