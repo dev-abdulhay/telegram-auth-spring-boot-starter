@@ -10,10 +10,11 @@ import java.util.function.Consumer;
 
 /**
  * Parses a Telegram {@code getUpdates} response and routes each update through
- * its module's handlers. Routing order: {@code callback_query} handler, then
- * the command registry, then the {@code contact} handler, then the text
- * handler, then the module fallback. Handlers receive the full update
- * {@link JsonNode}.
+ * its module's handlers. Routing order: {@code managed_bot} handler (a
+ * top-level {@code Update} field, checked before anything nested in
+ * {@code message}), then the {@code callback_query} handler, then the command
+ * registry, then the {@code contact} handler, then the text handler, then the
+ * module fallback. Handlers receive the full update {@link JsonNode}.
  *
  * <p>An unregistered {@code /command} reaches the <em>text</em> handler, not the
  * fallback: once the registry misses there is nothing left to distinguish it
@@ -73,6 +74,11 @@ public class BotUpdateDispatcher {
     }
 
     private void route(JsonNode update) {
+        if (update.has("managed_bot")) {
+            Consumer<JsonNode> handler = module.getManagedBotHandler();
+            invoke(handler != null ? handler : module.getFallback(), update);
+            return;
+        }
         if (update.has("callback_query")) {
             Consumer<JsonNode> handler = module.getCallbackHandler();
             invoke(handler != null ? handler : module.getFallback(), update);

@@ -42,6 +42,7 @@ public final class TelegramBotModule {
     private volatile Consumer<JsonNode> callbackHandler;
     private volatile Consumer<JsonNode> contactHandler;
     private volatile Consumer<JsonNode> textHandler;
+    private volatile Consumer<JsonNode> managedBotHandler;
 
     private TelegramBotModule(Builder b) {
         this.botToken = b.botToken;
@@ -118,6 +119,19 @@ public final class TelegramBotModule {
     public void onText(Consumer<JsonNode> handler) {
         this.textHandler = claimSlot("text", this.textHandler, handler);
     }
+
+    /**
+     * Handler for {@code managed_bot} updates — the creation, token change or
+     * owner change of a bot this bot manages. Single-slot with the same
+     * replace-guard as {@link #onCallbackQuery(Consumer)}.
+     *
+     * @throws IllegalStateException if a different handler is already registered
+     */
+    public void onManagedBot(Consumer<JsonNode> handler) {
+        this.managedBotHandler = claimSlot("managed_bot", this.managedBotHandler, handler);
+    }
+
+    public Consumer<JsonNode> getManagedBotHandler() { return managedBotHandler; }
 
     private static Consumer<JsonNode> claimSlot(String slot, Consumer<JsonNode> current, Consumer<JsonNode> handler) {
         if (current != null && current != handler) {
