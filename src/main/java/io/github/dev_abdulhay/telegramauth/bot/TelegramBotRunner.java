@@ -3,6 +3,7 @@ package io.github.dev_abdulhay.telegramauth.bot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -125,9 +126,12 @@ public class TelegramBotRunner {
 
     private void loop() {
         int timeoutS = (int) module.getPollingTimeout().toSeconds();
+        List<String> allowed = module.getManagedBotHandler() != null
+                ? List.of("message", "callback_query", "managed_bot")
+                : null;
         while (running.get()) {
             try {
-                String json = module.getBot().getUpdates(offset.get(), timeoutS);
+                String json = module.getBot().getUpdates(offset.get(), timeoutS, allowed);
                 long maxId = dispatcher.dispatch(json);
                 if (maxId > 0) {
                     offset.set(maxId + 1);

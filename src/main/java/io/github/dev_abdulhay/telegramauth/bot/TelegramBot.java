@@ -45,9 +45,24 @@ public class TelegramBot {
     }
 
     public String getUpdates(long offset, int timeoutSeconds) throws Exception {
-        String url = baseUrl + "/bot" + token + "/getUpdates?offset=" + offset
-                + "&timeout=" + timeoutSeconds;
-        HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+        return getUpdates(offset, timeoutSeconds, null);
+    }
+
+    /**
+     * @param allowedUpdates update types to receive, or {@code null} to let Telegram
+     *                       apply its default list. The default list excludes
+     *                       {@code managed_bot}, so a manager bot must pass it explicitly.
+     */
+    public String getUpdates(long offset, int timeoutSeconds, List<String> allowedUpdates) throws Exception {
+        StringBuilder url = new StringBuilder(baseUrl).append("/bot").append(token)
+                .append("/getUpdates?offset=").append(offset)
+                .append("&timeout=").append(timeoutSeconds);
+        if (allowedUpdates != null && !allowedUpdates.isEmpty()) {
+            url.append("&allowed_updates=")
+                    .append(URLEncoder.encode("[\"" + String.join("\",\"", allowedUpdates) + "\"]",
+                            StandardCharsets.UTF_8));
+        }
+        HttpRequest req = HttpRequest.newBuilder(URI.create(url.toString()))
                 .timeout(Duration.ofSeconds((long) timeoutSeconds + 5))
                 .GET()
                 .build();
