@@ -25,9 +25,22 @@ public interface BaseAuthSessionRepository<S extends BaseAuthSession>
 
     Optional<S> findByTokenHash(String tokenHash);
 
+    /**
+     * The same lookup <em>within one tenant bot</em>. A token minted by one tenant
+     * must not resolve through another tenant's service: the row would be moved to
+     * a terminal state and its event published on the wrong bot's
+     * {@code AuthEventBus}, leaving the browser that actually started the login
+     * waiting forever on a session that already reads APPROVED.
+     */
+    Optional<S> findByTokenHashAndBotUserId(String tokenHash, Long botUserId);
+
     /** Row-locked lookup used by approve/reject so concurrent terminal transitions serialize. */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<S> findWithLockByTokenHash(String tokenHash);
+
+    /** Tenant-scoped {@link #findWithLockByTokenHash}; see {@link #findByTokenHashAndBotUserId}. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<S> findWithLockByTokenHashAndBotUserId(String tokenHash, Long botUserId);
 
     /** Sessions in any of the given statuses whose deadline has passed. */
     List<S> findByStatusInAndExpiresAtBefore(Collection<BaseAuthSession.Status> statuses, OffsetDateTime time);
@@ -41,6 +54,16 @@ public interface BaseAuthSessionRepository<S extends BaseAuthSession>
     long countByIpAddressAndStatusInAndExpiresAtAfter(String ipAddress,
                                                       Collection<BaseAuthSession.Status> statuses,
                                                       OffsetDateTime time);
+
+    /**
+     * Live sessions for an IP <em>within one tenant bot</em>. A flood against one
+     * tenant must not consume another tenant's quota, even though both share the
+     * table.
+     */
+    long countByIpAddressAndBotUserIdAndStatusInAndExpiresAtAfter(String ipAddress,
+                                                                  Long botUserId,
+                                                                  Collection<BaseAuthSession.Status> statuses,
+                                                                  OffsetDateTime time);
 
     /**
      * Bulk-deletes old terminal sessions in one statement. A derived

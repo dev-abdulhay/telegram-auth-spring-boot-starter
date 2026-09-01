@@ -47,6 +47,10 @@
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
+        <!-- release, not just source/target: it also pins the platform API set, so a
+             build on a newer JDK cannot compile against a Java 18+ method and ship a
+             jar that fails at runtime on the 17 this library promises. -->
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
