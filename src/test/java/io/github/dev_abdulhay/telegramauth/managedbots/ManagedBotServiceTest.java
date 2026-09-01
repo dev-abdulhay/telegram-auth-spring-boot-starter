@@ -284,6 +284,31 @@ class ManagedBotServiceTest {
         assertThat(e.events().events).isEmpty();
     }
 
+    /**
+     * The decommission guard is one-shot, like the rotation guard, because a
+     * revocation is a single token change and therefore a single echo. An owner
+     * who re-authorises the very same bot inside the five-minute window is doing
+     * something genuine: blanket suppression dropped that update, so no row
+     * appeared, {@code onCreated} never fired, and — under the white-label
+     * runtime — the tenant stayed dark until the window expired.
+     */
+    @Test
+    void reAuthorisingADecommissionedBotInsideTheEchoWindowStillCountsAsACreation() throws Exception {
+        Env e = env();
+        e.service().handleUpdate(managedBotUpdate(555L, 7L));
+        e.service().decommission(555L);
+        e.events().events.clear();
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L)); // our own revocation echo
+        assertThat(e.store().findAll()).isEmpty();
+        assertThat(e.events().events).isEmpty();
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L)); // the owner, re-creating it
+
+        assertThat(e.store().findByBotUserId(555L)).isPresent();
+        assertThat(e.events().events).containsExactly("created:555:stored=true");
+    }
+
     @Test
     void aRotationAndItsEchoAnnounceExactlyOneRotation() throws Exception {
         Env e = env();

@@ -51,9 +51,12 @@ public class ManagedBotService {
     /**
      * One self-initiated token change we expect Telegram to echo back.
      *
-     * @param oneShot   {@code true} for a rotation, which produces exactly one echo;
-     *                  {@code false} for a decommission, which must stay suppressed
-     *                  for the whole window so a late echo cannot resurrect the row
+     * @param oneShot   {@code true} to suppress a single update, {@code false} to
+     *                  suppress every update until {@code expiresAt}. Both the
+     *                  changes we make — rotation and decommission — are a single
+     *                  {@code replaceManagedBotToken} call and so produce exactly
+     *                  one echo, so both register one-shot entries; the blanket
+     *                  mode is kept only for a change that would echo more than once
      * @param expiresAt when the entry stops suppressing, whether or not it was used
      */
     private record Echo(boolean oneShot, Instant expiresAt) {}
@@ -141,16 +144,19 @@ public class ManagedBotService {
      * row first would destroy the credentials the revocation needs and leave a bot
      * we can no longer reach. A failed revocation still clears local state.
      *
-     * <p>Telegram's echo of the revocation is suppressed for {@code ECHO_TTL},
-     * otherwise the incoming update would look like an unknown bot and we would
-     * fetch its brand-new token and re-create the row we just deleted.
+     * <p>Telegram's echo of the revocation is suppressed, otherwise the incoming
+     * update would look like an unknown bot and we would fetch its brand-new token
+     * and re-create the row we just deleted. The suppression is <b>one-shot</b>:
+     * the revocation is one token change and so echoes exactly once, and an owner
+     * who re-authorises the same bot moments later is doing something genuine that
+     * must still be treated as a creation.
      *
      * <p><b>Lenient about unknown ids</b> — unlike {@link #rotateToken(long)}, which
      * throws. That is deliberate: a bot whose token fetch failed exists on Telegram
      * but has no row here, and {@code decommission} is the only way to revoke it.
      */
     public void decommission(long botUserId) {
-        expectEcho(botUserId, false);
+        expectEcho(botUserId, true);
         try {
             module.getBot().replaceManagedBotToken(botUserId);
         } catch (RuntimeException e) {
@@ -216,7 +222,11 @@ public class ManagedBotService {
      * {@code onTokenFetchFailed} again, so recovering from inside that callback
      * cannot loop.
      *
-     * @param ownerUserId the bot's owner; kept as-is when the bot is already known
+     * @param ownerUserId the bot's owner, <b>always written</b> — unlike the username
+     *                    and first name, which this entry point cannot supply and
+     *                    which are therefore kept from the existing row. Recovering
+     *                    a bot the store already knows means passing the owner it
+     *                    already holds, or the row is rewritten with the wrong one
      * @return the stored bot
      * @throws io.github.dev_abdulhay.telegramauth.bot.TelegramApiException if the
      *         token could not be fetched after every configured attempt
@@ -254,8 +264,9 @@ public class ManagedBotService {
      * that change is not mistaken for the owner's doing. Registered <em>before</em>
      * the API call: the echo can be in flight before the call even returns.
      *
-     * @param oneShot suppress a single update (a rotation) rather than every update
-     *                until the entry expires (a decommission)
+     * @param oneShot suppress a single update rather than every update until the
+     *                entry expires; one call to {@code replaceManagedBotToken}
+     *                echoes once, so both callers pass {@code true}
      */
     private void expectEcho(long botUserId, boolean oneShot) {
         purgeEchoes();
