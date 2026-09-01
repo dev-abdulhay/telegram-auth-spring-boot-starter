@@ -674,14 +674,20 @@ owning user's Telegram account — the user removes it themselves through
 BotFather.
 
 Revoking is itself a token change, so Telegram sends the manager a
-`managed_bot` update echoing it. `ManagedBotService` suppresses that echo for
-5 minutes per bot; otherwise the update would look like a brand-new bot and
-the service would fetch the fresh token and re-create the row it just deleted.
-The same guard swallows exactly one echo after `rotateToken`, so a rotation
-you initiate fires `onTokenRotated` once rather than twice. **The guard is
-JVM-local and not replicated** (like the flow's pending-login state): on a
-multi-instance deployment an echo delivered to a different instance, or after
-a restart, is still processed as if the owner had done it.
+`managed_bot` update echoing it. `ManagedBotService` swallows that echo;
+otherwise the update would look like a brand-new bot and the service would fetch
+the fresh token and re-create the row it just deleted. `rotateToken` is guarded
+the same way, so a rotation you initiate fires `onTokenRotated` once rather than
+twice.
+
+The guard is **one-shot** — one `replaceManagedBotToken` call echoes once — and
+the entry expires after 5 minutes if the echo never arrives at all. So an owner
+who genuinely re-authorises a bot you just decommissioned, or rotates one moments
+after you did, is handled normally: the second update is not mistaken for your
+echo, and the bot comes back. **The guard is JVM-local and not replicated** (like
+the flow's pending-login state): on a multi-instance deployment an echo delivered
+to a different instance, or after a restart, is still processed as if the owner
+had done it.
 
 `decommission` is deliberately lenient about ids it does not know — unlike
 `rotateToken`, which throws `IllegalArgumentException`. That is the only way
@@ -700,7 +706,9 @@ the configured retries, encrypt, store, then publish `onCreated` or
 `onTokenRotated`) without needing an update. Unlike `handleUpdate` it
 **throws** `TelegramApiException` on failure instead of publishing
 `onTokenFetchFailed` again, so calling it from inside that callback cannot
-loop:
+loop. Note that `ownerUserId` is **always written** to the row — for a bot the
+store already knows, pass the owner it already holds (the username and first
+name, which this entry point cannot supply, are kept from the existing row):
 
 ```java
 @Bean

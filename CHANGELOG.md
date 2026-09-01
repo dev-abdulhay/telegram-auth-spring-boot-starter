@@ -169,6 +169,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by whichever JDK happens to run the build.
 
 ### Fixed
+- **Re-authorising a bot right after decommissioning it is no longer swallowed.**
+  `decommission` registered a *blanket* echo guard, suppressing every
+  `managed_bot` update for that bot for five minutes rather than the single echo
+  its own token revocation produces. An owner who re-created the same bot inside
+  that window got nothing: no row, no `onCreated`, and — under the white-label
+  runtime — no tenant bot, until the window expired. The guard is now one-shot,
+  matching `rotateToken`.
 - **A tenant bot with a blank stored token no longer looks healthy.** An empty
   decrypt yields `Optional.of("")`, which passed the registry's no-token check;
   the runner then declined to poll and returned, while `TenantBotRegistry.start`
