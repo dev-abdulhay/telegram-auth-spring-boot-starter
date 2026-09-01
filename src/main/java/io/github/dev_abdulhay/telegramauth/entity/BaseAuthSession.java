@@ -26,6 +26,12 @@ import java.time.OffsetDateTime;
  * public class DemoSession extends BaseAuthSession { }
  * }</pre>
  *
+ * <p><b>White-label hosts index {@code ip_address,bot_user_id,status} instead.</b>
+ * A session created through a module that carries a bot id is rate-limited within
+ * its own tenant, so that lookup filters on {@code (ip_address, bot_user_id,
+ * status, expires_at)} and an {@code ip_address,status} index leaves the bot id
+ * to be filtered row by row.
+ *
  * <p>{@code token_hash} is already indexed by its unique constraint.
  */
 @MappedSuperclass
