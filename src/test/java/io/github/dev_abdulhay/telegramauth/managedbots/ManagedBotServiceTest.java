@@ -25,6 +25,7 @@ class ManagedBotServiceTest {
         final List<String> calls = new ArrayList<>();
         String token = "999:CHILD";
         int failFetches;
+        boolean failReplace;
         /** Set by env() so ordering-sensitive fakes can observe the store's state. */
         ManagedBotTokenStore store;
         JsonNode accessSettings;
@@ -47,6 +48,9 @@ class ManagedBotServiceTest {
             // reversed decommission() that deletes before revoking.
             boolean stillStored = store != null && store.findByBotUserId(botUserId).isPresent();
             calls.add("replace:" + botUserId + ":stillStored=" + stillStored);
+            if (failReplace) {
+                throw new TelegramApiException(400, "bot not found");
+            }
             return "999:ROTATED";
         }
 
@@ -282,6 +286,29 @@ class ManagedBotServiceTest {
         assertThat(e.store().findAll()).isEmpty();
         assertThat(e.service().findToken(555L)).isEmpty();
         assertThat(e.events().events).isEmpty();
+    }
+
+    /**
+     * {@code decommission} arms the guard before calling {@code replaceManagedBotToken}
+     * because the echo can be in flight before the call returns — but when that call
+     * itself throws (the owner already deleted the bot in BotFather), no echo is ever
+     * coming. Without disarming the guard here, it would sit armed for the rest of its
+     * five-minute window and swallow the owner's next genuine {@code managed_bot}
+     * update, e.g. re-creating the very same bot.
+     */
+    @Test
+    void aFailedRevocationDisarmsTheGuardSoARealRecreationIsNotSwallowed() throws Exception {
+        Env e = env();
+        e.service().handleUpdate(managedBotUpdate(555L, 7L));
+        e.bot().failReplace = true;
+
+        e.service().decommission(555L);
+        e.events().events.clear();
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L)); // the owner, re-creating it
+
+        assertThat(e.store().findByBotUserId(555L)).isPresent();
+        assertThat(e.events().events).containsExactly("created:555:stored=true");
     }
 
     /**

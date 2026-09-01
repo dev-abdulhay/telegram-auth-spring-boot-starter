@@ -680,11 +680,14 @@ the fresh token and re-create the row it just deleted. `rotateToken` is guarded
 the same way, so a rotation you initiate fires `onTokenRotated` once rather than
 twice.
 
-The guard is **one-shot** — one `replaceManagedBotToken` call echoes once — and
-the entry expires after 5 minutes if the echo never arrives at all. So an owner
-who genuinely re-authorises a bot you just decommissioned, or rotates one moments
-after you did, is handled normally: the second update is not mistaken for your
-echo, and the bot comes back. **The guard is JVM-local and not replicated** (like
+The guard is **one-shot** — one `replaceManagedBotToken` call echoes once. For
+`decommission`, if that call itself fails (for example the owner already deleted
+the bot in BotFather), no echo is coming, so the guard is disarmed immediately
+rather than left armed; only a revocation that *succeeds* but whose echo is slow
+or never arrives waits out the 5-minute TTL. So an owner who genuinely
+re-authorises a bot you just decommissioned, or rotates one moments after you
+did, is handled normally: the second update is not mistaken for your echo, and
+the bot comes back. **The guard is JVM-local and not replicated** (like
 the flow's pending-login state): on a multi-instance deployment an echo delivered
 to a different instance, or after a restart, is still processed as if the owner
 had done it.
