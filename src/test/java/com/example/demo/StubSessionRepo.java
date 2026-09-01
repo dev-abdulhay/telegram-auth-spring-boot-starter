@@ -25,8 +25,16 @@ public class StubSessionRepo implements DemoSessionRepository {
     @Override public Optional<DemoSession> findByTokenHash(String tokenHash) {
         return store.values().stream().filter(s -> tokenHash.equals(s.getTokenHash())).findFirst();
     }
+    @Override public Optional<DemoSession> findByTokenHashAndBotUserId(String tokenHash, Long botUserId) {
+        return store.values().stream()
+                .filter(s -> tokenHash.equals(s.getTokenHash()) && botUserId.equals(s.getBotUserId()))
+                .findFirst();
+    }
     @Override public Optional<DemoSession> findWithLockByTokenHash(String tokenHash) {
         return findByTokenHash(tokenHash);
+    }
+    @Override public Optional<DemoSession> findWithLockByTokenHashAndBotUserId(String tokenHash, Long botUserId) {
+        return findByTokenHashAndBotUserId(tokenHash, botUserId);
     }
     @Override public List<DemoSession> findByStatusInAndExpiresAtBefore(
             java.util.Collection<BaseAuthSession.Status> statuses, OffsetDateTime time) {
