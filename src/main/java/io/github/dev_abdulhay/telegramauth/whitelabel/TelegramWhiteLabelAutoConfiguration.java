@@ -2,6 +2,7 @@ package io.github.dev_abdulhay.telegramauth.whitelabel;
 
 import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession;
 import io.github.dev_abdulhay.telegramauth.entity.BaseTelegramUser;
+import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotService;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotTokenStore;
 import io.github.dev_abdulhay.telegramauth.managedbots.TelegramManagedBotsAutoConfiguration;
@@ -12,6 +13,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.context.annotation.Primary;
 
 import java.util.concurrent.ThreadFactory;
 
@@ -20,8 +22,9 @@ import java.util.concurrent.ThreadFactory;
  *
  * <p>Ordered before the managed-bots auto-configuration on purpose: that one
  * registers a no-op {@code ManagedBotEvents} under {@code @ConditionalOnMissingBean},
- * and the event bridge has to win. When this runtime is on, the library owns the
- * events bean; a host adding its own per-bot wiring uses {@link ManagedBotCustomizer}.
+ * and the event bridge has to win. A host that declares its own
+ * {@code ManagedBotEvents} keeps it — the bridge is {@code @Primary} and forwards
+ * to it — while per-bot wiring belongs in {@link ManagedBotCustomizer}.
  *
  * <p><b>{@code @Lazy} on {@code managedBots} below is load-bearing, not decorative.</b>
  * {@code ManagedBotService} takes {@code ManagedBotEvents} as a constructor argument,
@@ -57,11 +60,20 @@ public class TelegramWhiteLabelAutoConfiguration {
                 threadFactory.getIfAvailable(), properties.getPollFailureBudget());
     }
 
+    /**
+     * {@code @Primary} because the bridge is not the only {@code ManagedBotEvents}
+     * a context may hold: a host is free to declare its own, and without a primary
+     * candidate {@code ManagedBotService}'s injection point would see two and fail
+     * the context. The host's bean is not shadowed — the bridge is handed every
+     * candidate and forwards to each one after doing the registry work.
+     */
     @Bean
+    @Primary
     @ConditionalOnMissingBean
     public <U extends BaseTelegramUser, S extends BaseAuthSession> TenantBotEventBridge<U, S>
-    tenantBotEventBridge(TenantBotRegistry<U, S> registry) {
-        return new TenantBotEventBridge<>(registry);
+    tenantBotEventBridge(TenantBotRegistry<U, S> registry,
+                         ObjectProvider<ManagedBotEvents> hostEvents) {
+        return new TenantBotEventBridge<>(registry, hostEvents);
     }
 
     @Bean
