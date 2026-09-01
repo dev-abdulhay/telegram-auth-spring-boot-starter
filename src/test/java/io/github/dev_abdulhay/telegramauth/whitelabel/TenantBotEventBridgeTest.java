@@ -3,6 +3,7 @@ package io.github.dev_abdulhay.telegramauth.whitelabel;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBot;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.OffsetDateTime;
@@ -176,6 +177,32 @@ class TenantBotEventBridgeTest {
         TenantBotEventBridge<DemoU, DemoS> bridge =
                 new TenantBotEventBridge<>(registry, beans(candidates));
         candidates.add(bridge); // as Spring sees it: the bridge is one of the beans
+
+        bridge.onCreated(bot(555L));
+
+        assertThat(registry.calls).containsExactly("start:555");
+    }
+
+    /**
+     * The proxy-safety trap: nothing in a stock context proxies this bean, but a
+     * host with a broad auto-proxy creator or aspect can end up with a JDK or
+     * CGLIB proxy of the bridge among the candidates. Plain {@code != this} does
+     * not recognise that proxy as the bridge, so it would forward into it — and
+     * the proxy delegates straight back into {@code onCreated}, recursing until
+     * {@code StackOverflowError} (caught by {@code guard}, but only after a log
+     * storm and thousands of {@code registry.start} calls). Built with Spring's
+     * own {@code ProxyFactory}, exactly what such a host's infrastructure would
+     * hand back: a real JDK dynamic proxy around the bridge, not a hand-rolled
+     * stand-in.
+     */
+    @Test
+    void theBridgeUnwrapsAnAopProxyOfItselfInsteadOfRecursingIntoIt() {
+        RecordingRegistry registry = new RecordingRegistry();
+        List<ManagedBotEvents> candidates = new ArrayList<>();
+        TenantBotEventBridge<DemoU, DemoS> bridge =
+                new TenantBotEventBridge<>(registry, beans(candidates));
+        ManagedBotEvents proxiedSelf = (ManagedBotEvents) new ProxyFactory(bridge).getProxy();
+        candidates.add(proxiedSelf); // what a host's auto-proxy creator would put in the context
 
         bridge.onCreated(bot(555L));
 

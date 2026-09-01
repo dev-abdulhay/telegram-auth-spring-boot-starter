@@ -188,6 +188,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry's are. The bridge filters itself out of that forwarding, so it never
   calls itself. Previously documented as an unavoidable startup failure; it is
   an extension point.
+- **`TenantBotEventBridge`'s self-filter is now proxy-safe.** It picked itself
+  out of the forwarding candidates with `!= this`, which is correct in a stock
+  context — the bridge is a plain bean with no `@Transactional`/`@Async` and
+  nothing proxies it — but a host with a broad auto-proxy creator or aspect
+  whose pointcut matches library classes could get a JDK or CGLIB proxy of the
+  bridge among the candidates instead. `!= this` did not recognise that proxy
+  as itself, so the bridge forwarded into it, the proxy delegated straight
+  back, and it recursed until `StackOverflowError` — caught by the existing
+  guard, but only after a log storm and thousands of `registry.start` calls.
+  The comparison now unwraps Spring AOP proxies first.
 - **A tenant bot with a blank stored token no longer looks healthy.** An empty
   decrypt yields `Optional.of("")`, which passed the registry's no-token check;
   the runner then declined to poll and returned, while `TenantBotRegistry.start`
