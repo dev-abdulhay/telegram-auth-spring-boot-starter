@@ -87,13 +87,26 @@ public class TelegramBotRunner {
         this.failureListener = listener;
     }
 
-    public void start() {
+    /**
+     * Begins polling, unless there is nothing to poll with.
+     *
+     * <p>The return value is the only way a caller can tell a live runner from a
+     * dead one: a blank token disables polling but leaves the object intact and
+     * silent — it accrues no poll failures, so the failure budget never fires
+     * either. A caller that ignores this (the static {@link TelegramBotLifecycle},
+     * where a blank token is a misconfiguration the warning already covers) is
+     * fine; a caller that publishes the runner as healthy must not.
+     *
+     * @return {@code true} when the poll loop was actually submitted; {@code false}
+     *         when the token is blank or this runner is already running
+     */
+    public boolean start() {
         String token = module.getBotToken();
         if (token == null || token.isBlank()) {
             log.warn("bot token blank for @{} — polling disabled", module.getUsername());
-            return;
+            return false;
         }
-        if (!running.compareAndSet(false, true)) return;
+        if (!running.compareAndSet(false, true)) return false;
         ThreadPoolExecutor pool = new ThreadPoolExecutor(
                 1, 1, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(WORKER_QUEUE_CAPACITY),
@@ -104,6 +117,7 @@ public class TelegramBotRunner {
         executor = Executors.newSingleThreadExecutor(factoryOr("tg-auth-poll-" + module.getUsername()));
         executor.submit(this::loop);
         log.info("Telegram polling started for @{}, token={}", module.getUsername(), module.getBot().maskedToken());
+        return true;
     }
 
     public void stop() {
@@ -116,7 +130,10 @@ public class TelegramBotRunner {
     /**
      * The supplied factory when there is one, otherwise a named daemon factory.
      * A supplied factory is used as-is: it owns its threads' names and daemon
-     * status, and forcing {@code setDaemon} on a virtual thread would throw.
+     * status. Renaming or re-flagging its threads would also be wrong for a
+     * virtual-thread factory, where {@code setDaemon(false)} throws outright
+     * (virtual threads are always daemons) and {@code setDaemon(true)} is a
+     * no-op that only pretends the setting was honoured.
      */
     private ThreadFactory factoryOr(String name) {
         if (threadFactory != null) return threadFactory;

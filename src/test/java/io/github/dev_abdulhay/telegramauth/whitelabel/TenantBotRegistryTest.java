@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -304,6 +305,85 @@ class TenantBotRegistryTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("999");
         assertThat(registry.running()).isEmpty();
+    }
+
+    /**
+     * A stored token that decrypts to an empty string is the nastiest shape of
+     * broken this class has: {@code findToken} answers {@code Optional.of("")}, so
+     * the no-token check passes; the factory happily builds a module; and the
+     * runner logs one warning and declines to poll. Before {@code start()}
+     * reported that, the registry published the bot as started — it appeared in
+     * {@code running()}, handed out a session service, and accrued no poll
+     * failures, so the failure budget never rescued it either. A permanently dead
+     * tenant that every health check called healthy.
+     */
+    @Test
+    void aBlankStoredTokenFailsTheStartInsteadOfRegisteringADeadBot() {
+        ManagedBot b = storedBot(555L, "");
+        TenantBotRegistry<DemoU, DemoS> registry = registry(null);
+        try {
+            assertThatThrownBy(() -> registry.start(b))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("555");
+
+            assertThat(registry.running()).isEmpty();
+            assertThat(registry.sessionServiceFor(555L)).isEmpty();
+        } finally {
+            registry.stopAll();
+        }
+    }
+
+    /**
+     * What a host gets when its {@code TenantBotFactory} injects a singleton
+     * session service instead of resolving a prototype-scoped one: a fresh module
+     * per tenant, but one shared service — which keeps serving every later tenant
+     * the <em>first</em> tenant's module, and therefore its token, its
+     * {@code AuthEventBus} and its rate-limit scope. Nothing downstream can tell
+     * that from correct wiring, so the registry has to catch it here, where it can
+     * still see both entries.
+     */
+    @Test
+    void aFactoryReturningOneSessionServiceForEveryTenantIsRejected() {
+        ManagedBot a = storedBot(555L, "555:A");
+        ManagedBot b = storedBot(556L, "556:B");
+        AtomicReference<StubTenantSessionService> singleton = new AtomicReference<>();
+        TenantBotRegistry<DemoU, DemoS> registry = new TenantBotRegistry<>(managedBots, (mb, token) -> {
+            QuietBot quietBot = new QuietBot(token);
+            quietBots.put(token, quietBot);
+            TelegramBotModule m = TelegramBotModule.builder(token, mb.username())
+                    .bot(quietBot)
+                    .botUserId(mb.botUserId())
+                    .build();
+            singleton.compareAndSet(null, new StubTenantSessionService(m));
+            return new RunningBot<>(m, singleton.get());
+        }, null, null, null);
+        try {
+            registry.start(a);
+
+            assertThatThrownBy(() -> registry.start(b))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("prototype");
+            assertThat(registry.running()).containsExactly(555L);
+            assertThat(registry.sessionServiceFor(556L)).isEmpty();
+        } finally {
+            registry.stopAll();
+        }
+    }
+
+    /** Two tenants each getting their own instances is the correct case and must not trip the check. */
+    @Test
+    void twoTenantsWithTheirOwnServicesBothStart() {
+        ManagedBot a = storedBot(555L, "555:A");
+        ManagedBot b = storedBot(556L, "556:B");
+        TenantBotRegistry<DemoU, DemoS> registry = registry(null);
+        try {
+            registry.start(a);
+            registry.start(b);
+
+            assertThat(registry.running()).containsExactlyInAnyOrder(555L, 556L);
+        } finally {
+            registry.stopAll();
+        }
     }
 
     @Test
