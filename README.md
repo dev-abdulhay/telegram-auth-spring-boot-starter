@@ -870,6 +870,13 @@ carries no `@Transactional` and delegates every write to the session service.
 > **first** tenant's module — tenant B mints tokens against tenant A's bot,
 > publishes to tenant A's event bus, and draws on tenant A's rate-limit bucket.
 >
+> This one is caught rather than suffered: `TenantBotRegistry#start`
+> compares the object the factory returned against the ones it already holds and
+> throws `IllegalStateException` if a second tenant is handed the same session
+> service or module. The second tenant fails to start, loudly, instead of quietly
+> running on the first tenant's identity. It is a backstop, not a substitute for
+> getting the scope right — it only fires once two tenants are live.
+>
 > **3. Prototype scope alone is not enough — the module has to reach the bean.**
 > Declare the `@Bean` method so the module is a construction argument and pass it
 > with `ObjectProvider#getObject(args)`. Spring matches explicit arguments
@@ -883,11 +890,28 @@ carries no `@Transactional` and delegates every write to the session service.
 ### `.botUserId(bot.botUserId())` is not optional
 
 The module builder's `botUserId` is what stamps the tenant onto every session
-row. Leave it out and the module still works — it polls, logins succeed — but
-`AbstractSessionService#create` writes a `null` `bot_user_id` and falls back to
-the table-wide rate-limit count. Every tenant then shares **one**
-`maxPendingPerIp` bucket, so a flood against one tenant locks logins for all of
-them, and no session can afterwards be attributed to the bot that created it.
+row, and what every tenant-scoped query keys off. Leave it out and the module
+still works — it polls, logins succeed — but `AbstractSessionService#create`
+writes a `null` `bot_user_id`, and the service falls back to its table-wide
+behaviour on both counts below.
+
+**Rate limiting.** Every tenant then shares **one** `maxPendingPerIp` bucket, so
+a flood against one tenant locks logins for all of them, and no session can
+afterwards be attributed to the bot that created it.
+
+**Session lookup.** With a bot id set, `findByRawToken`, `approve`, `awaitCode`
+and `reject` resolve the session by `token_hash` **and** `bot_user_id`, so a
+token minted by tenant A simply does not exist as far as tenant B's service is
+concerned. Without it, one tenant's service will happily complete another's
+session — and publish the terminal event on the wrong bot's `AuthEventBus`,
+leaving the browser that started the login waiting forever on a session the
+database already shows as `APPROVED`.
+
+A module with no bot id keeps the original unscoped queries exactly as they
+were, so nothing changes for a statically configured host. If you implement
+`BaseAuthSessionRepository` by hand rather than letting Spring Data derive it,
+note the two added methods: `findByTokenHashAndBotUserId` and
+`findWithLockByTokenHashAndBotUserId`.
 
 ### Configuration
 
@@ -1038,19 +1062,31 @@ ThreadFactory tenantThreadFactory() {
 API** — the seam is a plain `java.util.concurrent.ThreadFactory`, and the
 decision is entirely the host's.
 
-Two things to know before reaching for it:
+Three things to know before reaching for it:
 
 - **Supplying a factory erases the name distinction.** The supplied factory is
-  used as-is for *both* pools — it owns its threads' names and daemon status, and
-  forcing `setDaemon` on a virtual thread would throw — so `tg-auth-poll-` and
-  `tg-auth-work-` disappear from thread dumps. Operators lose the ability to tell
-  a stuck poll from a stuck handler at a glance. That is a real diagnostic cost,
-  not a cosmetic one.
+  used as-is for *both* pools — it owns its threads' names and daemon status — so
+  `tg-auth-poll-` and `tg-auth-work-` disappear from thread dumps. Operators lose
+  the ability to tell a stuck poll from a stuck handler at a glance. That is a
+  real diagnostic cost, not a cosmetic one. (The runtime could not re-flag those
+  threads even if it wanted to: on a virtual thread `setDaemon(false)` throws
+  outright, and `setDaemon(true)` is a no-op that only looks like it worked.)
 - **The registry resolves the factory with `getIfAvailable()`, so declare at most
   one.** Two `ThreadFactory` beans in the context fail startup with
   `NoUniqueBeanDefinitionException: … expected single matching bean but found 2`.
   If your application already has one for unrelated work, mark one `@Primary` or
   keep the runtime on the built-in default.
+- **One *unrelated* `ThreadFactory` bean is the case that actually bites**, and it
+  is silent. `getIfAvailable()` cannot tell a factory meant for the bot pools from
+  one you declared for a scheduler or a batch job: it finds the single candidate
+  and adopts it for both pools of every tenant bot. There is no error, no warning,
+  and nothing in the logs — the only symptom is that `tg-auth-poll-*` and
+  `tg-auth-work-*` are simply not in the thread dump, and your bots are running on
+  someone else's threads. There is no way to tell the runtime "use the built-in
+  default anyway": if a `ThreadFactory` bean is visible, it wins. So if the one in
+  your context was not meant for the bots, keep it out of the candidate pool —
+  declare it as a narrower type, or qualify it behind your own configuration
+  instead of exposing it as a bare `ThreadFactory` bean.
 
 **The practical ceiling is untested.** No load test in this repository establishes
 how many tenant bots one instance can carry, and threads are probably not the

@@ -67,8 +67,21 @@ public class TelegramWhiteLabelAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public <U extends BaseTelegramUser, S extends BaseAuthSession> TenantBotLifecycle<U, S>
-    tenantBotLifecycle(ManagedBotTokenStore store, TenantBotRegistry<U, S> registry,
+    tenantBotLifecycle(ObjectProvider<ManagedBotTokenStore> store, TenantBotRegistry<U, S> registry,
                        TelegramWhiteLabelProperties properties) {
-        return new TenantBotLifecycle<>(store, registry, properties.isRestoreOnStartup());
+        // Taken through a provider purely so the failure is legible. Injected
+        // directly, the commonest misconfiguration — white-label on, managed bots
+        // off — surfaces as a raw NoSuchBeanDefinitionException for a type the host
+        // never asked for, naming neither switch. Same shape as the factory check.
+        ManagedBotTokenStore s = store.getIfAvailable();
+        if (s == null) {
+            throw new IllegalStateException(
+                    "a ManagedBotTokenStore bean is required when telegram.white-label.enabled=true; "
+                            + "the white-label runtime is built on the managed-bots feature, so set "
+                            + "telegram.managed-bots.enabled=true and declare a store bean "
+                            + "(InMemoryManagedBotStore, or JpaManagedBotTokenStore over your own "
+                            + "BaseManagedBot entity)");
+        }
+        return new TenantBotLifecycle<>(s, registry, properties.isRestoreOnStartup());
     }
 }

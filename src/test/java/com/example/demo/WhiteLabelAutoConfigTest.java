@@ -59,6 +59,21 @@ class WhiteLabelAutoConfigTest {
         }
     }
 
+    // Same as HostBeans but deliberately missing store() — the shape a host lands
+    // in when it turns the white-label runtime on and leaves managed bots off,
+    // since that switch is what would otherwise have supplied the store.
+    @TestConfiguration
+    static class HostBeansWithoutStore {
+        @Bean TelegramBotModule module() {
+            return TelegramBotModule.builder("123:ABC", "manager_bot").build();
+        }
+        @Bean TenantBotFactory<DemoUser, DemoSession> factory() {
+            return (bot, token) -> new RunningBot<>(
+                    TelegramBotModule.builder(token, bot.username()).botUserId(bot.botUserId()).build(),
+                    null);
+        }
+    }
+
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(
                     TelegramWhiteLabelAutoConfiguration.class,
@@ -97,6 +112,27 @@ class WhiteLabelAutoConfigTest {
                         "telegram.managed-bots.encryption-key=" + KEY)
                 .run(ctx -> assertThat(ctx).hasFailed()
                         .getFailure().hasMessageContaining("TenantBotFactory"));
+    }
+
+    /**
+     * White-label on, managed bots off: the runtime is built on the managed-bots
+     * feature, so the store it needs is never registered. Injected directly this
+     * surfaced as a raw {@code NoSuchBeanDefinitionException} for
+     * {@code ManagedBotTokenStore} — a type the host never asked for, naming
+     * neither switch. The message has to point at the actual fix.
+     */
+    @Test
+    void enablingItWithoutTheManagedBotsSwitchNamesTheMissingSwitch() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        TelegramWhiteLabelAutoConfiguration.class,
+                        TelegramManagedBotsAutoConfiguration.class))
+                .withUserConfiguration(HostBeansWithoutStore.class)
+                .withPropertyValues("telegram.white-label.enabled=true")
+                .run(ctx -> assertThat(ctx).hasFailed()
+                        .getFailure()
+                        .hasMessageContaining("ManagedBotTokenStore")
+                        .hasMessageContaining("telegram.managed-bots.enabled=true"));
     }
 
     @Test

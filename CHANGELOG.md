@@ -145,8 +145,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alongside `ip_address` (`ip_address,bot_user_id,status` rather than
   `ip_address,status`), since the per-tenant count filters on
   `(ip_address, bot_user_id, status, expires_at)`.
+- **Session lookup is now tenant-scoped too.** When the module carries a
+  `botUserId`, `AbstractSessionService`'s `findByRawToken`, `approve`,
+  `awaitCode` and `reject` resolve the row by `token_hash` **and**
+  `bot_user_id`. A module without a bot id keeps the original unscoped queries
+  unchanged, so nothing changes for a statically configured host. Two derived
+  finders back this: `BaseAuthSessionRepository.findByTokenHashAndBotUserId`
+  and `findWithLockByTokenHashAndBotUserId` (the locked variant carries the
+  same `PESSIMISTIC_WRITE`). Hosts that implement the repository by hand rather
+  than letting Spring Data derive it must add both.
+- `TelegramBotRunner.start()` returns `boolean` instead of `void`: `true` when
+  the poll loop was submitted, `false` for a blank token or a runner that was
+  already running. Source-compatible for callers that ignore the result.
+- `TenantBotRegistry.stop` logs at WARN when it finds only an unpublished
+  reservation and drops the stop. The behaviour is unchanged and deliberate,
+  but a dropped stop during a token rotation leaves the bot polling a revoked
+  token until the failure budget expires, and that was previously invisible.
+- `TenantBotRegistry.stopAll` makes a second pass over the live ids, so a bot
+  whose `start()` was still mid-flight during the first pass does not keep
+  polling after the registry has reported everything stopped.
+- The build now sets `maven.compiler.release=17` alongside source/target, so
+  the Java 17 floor is enforced by the compiler's platform API set rather than
+  by whichever JDK happens to run the build.
 
 ### Fixed
+- **A tenant bot with a blank stored token no longer looks healthy.** An empty
+  decrypt yields `Optional.of("")`, which passed the registry's no-token check;
+  the runner then declined to poll and returned, while `TenantBotRegistry.start`
+  published the bot as started. It appeared in `running()`, handed out a session
+  service through `sessionServiceFor`, and accrued no poll failures — so the
+  failure budget never fired either. A permanently dead tenant that every health
+  check reported as healthy. `start()` now throws and releases its reservation.
+- **One tenant can no longer complete another tenant's login.** `create` wrote
+  `bot_user_id`, but every lookup queried by token hash alone, so
+  `registry.sessionServiceFor(B).approve(tokenMintedByA)` succeeded and
+  published the terminal event on **B's** `AuthEventBus` — tenant A's browser
+  waited forever while the row read `APPROVED`. Not privilege escalation (the
+  token is a secret and the Telegram identity is genuine), but it is the tenant
+  isolation this feature advertises.
+- **The singleton mis-wiring of `TenantBotFactory` is now detected.** A host
+  returning a singleton session service serves every tenant after the first the
+  *first* tenant's module — a silent cross-tenant token, event-bus and
+  rate-limit leak. `TenantBotRegistry.start` now compares the returned session
+  service and module by identity against the live entries and throws
+  `IllegalStateException` naming the prototype-scope requirement.
+- `TelegramWhiteLabelAutoConfiguration` fails with a message naming the missing
+  switch when `telegram.white-label.enabled=true` but `telegram.managed-bots`
+  is off. It previously surfaced a raw
+  `NoSuchBeanDefinitionException: ManagedBotTokenStore` for a type the host
+  never asked for, naming neither property.
 - `ManagedBotService.decommission(botUserId)` no longer resurrects the bot it
   just decommissioned. Revoking a token *is* a token change, so Telegram
   echoed it back as a `managed_bot` update; that update found an unknown bot,
