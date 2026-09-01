@@ -6,6 +6,7 @@ import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBot;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.function.Consumer;
@@ -30,7 +31,12 @@ import java.util.function.Consumer;
  * single-candidate lookup returns — so forwarding blindly would recurse straight
  * back into this class. The candidates are therefore filtered by identity, and
  * that has to happen <em>at call time</em>: at construction time this bean does
- * not exist yet, so there is nothing to compare against.
+ * not exist yet, so there is nothing to compare against. The comparison first
+ * unwraps any Spring AOP proxy via {@link AopProxyUtils#getSingletonTarget}, so
+ * a host whose auto-proxy creator or aspect happens to wrap this bean — nothing
+ * in a stock context proxies it — still recognises and filters out itself
+ * instead of forwarding into a proxy that delegates straight back, recursing
+ * until {@code StackOverflowError}.
  */
 public class TenantBotEventBridge<U extends BaseTelegramUser, S extends BaseAuthSession>
         implements ManagedBotEvents {
@@ -94,8 +100,25 @@ public class TenantBotEventBridge<U extends BaseTelegramUser, S extends BaseAuth
         if (hostEvents == null) return;
         String action = "hand " + event + " to the host's ManagedBotEvents for";
         guard(action, botUserId, () -> hostEvents.orderedStream()
-                .filter(delegate -> delegate != this)
+                .filter(delegate -> unwrapProxy(delegate) != this)
                 .forEach(delegate -> guard(action, botUserId, () -> call.accept(delegate))));
+    }
+
+    /**
+     * Peels away any Spring AOP proxy (JDK or CGLIB) around {@code candidate},
+     * repeating for proxies of proxies, until it reaches the real singleton target
+     * — or {@code candidate} itself if it was never a proxy to begin with.
+     * {@code AopProxyUtils} has no single call for this; it is assembled the same
+     * way {@code ultimateTargetClass} walks the chain, one {@code getSingletonTarget}
+     * hop at a time.
+     */
+    private static Object unwrapProxy(Object candidate) {
+        Object current = candidate;
+        Object target;
+        while ((target = AopProxyUtils.getSingletonTarget(current)) != null) {
+            current = target;
+        }
+        return current;
     }
 
     private void guard(String action, long botUserId, Runnable body) {
