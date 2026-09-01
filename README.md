@@ -1104,20 +1104,36 @@ client's pool, and Telegram's own tolerance for concurrent pollers from one IP �
 will bite before thread count does. Measure it for your deployment; do not read a
 number into this section, because there isn't one.
 
-### The library owns the `ManagedBotEvents` bean
+### `TenantBotEventBridge` takes over `ManagedBotEvents` — and forwards to yours
 
-When the runtime is on, `TenantBotEventBridge` **is** the `ManagedBotEvents`
-bean: the white-label auto-configuration is ordered before the managed-bots one
-so its bridge wins the `@ConditionalOnMissingBean`, and `ManagedBotService` is
-wired with it. That is what turns bot lifecycle into runtime lifecycle — created
-starts, token-rotated restarts, decommissioned stops, each failure swallowed and
-logged so one bad tenant cannot disturb the manager bot or the others.
+When the runtime is on, `TenantBotEventBridge` is the `ManagedBotEvents`
+`ManagedBotService` is wired with: the white-label auto-configuration is ordered
+before the managed-bots one, so its bridge wins the `@ConditionalOnMissingBean`
+that would otherwise register a no-op, and the bridge is `@Primary` so it stays
+the one candidate the service resolves to. That is what turns bot lifecycle into
+runtime lifecycle — created starts, token-rotated restarts, decommissioned stops,
+each failure swallowed and logged so one bad tenant cannot disturb the manager
+bot or the others.
 
-So a host **cannot** also declare its own `ManagedBotEvents` bean: the context
-fails with `NoUniqueBeanDefinitionException … found 2: yourEvents,
-tenantBotEventBridge`. Per-bot wiring belongs in `ManagedBotCustomizer`; anything
-else you need from the lifecycle you can do inside the `TenantBotFactory`, which
-runs on every start.
+**You can still declare your own `ManagedBotEvents` bean.** It is not shadowed:
+the bridge is handed every `ManagedBotEvents` in the context and hands each of
+the four callbacks — `onCreated`, `onTokenRotated`, `onDecommissioned`,
+`onTokenFetchFailed` — on to yours. Two rules govern that forwarding:
+
+- **The registry runs first.** Your hook is called *after* the tenant bot has
+  been started, restarted or stopped, so a hook that throws cannot keep a tenant
+  down.
+- **Your exceptions are swallowed, exactly as the registry's are.** The bridge
+  catches `Throwable` and logs a warning — this is the manager bot's update
+  worker thread, and nothing on it may escape. Do not rely on an exception from
+  your hook reaching anything; log or record what you need yourself.
+
+The bridge is itself a `ManagedBotEvents` bean, so it filters itself out of that
+forwarding list by identity — it never calls itself, and adding your own bean
+costs you nothing.
+
+Per-bot wiring still belongs in `ManagedBotCustomizer`; anything else you need at
+start time you can do inside the `TenantBotFactory`, which runs on every start.
 
 ### Single instance only
 

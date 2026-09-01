@@ -3,6 +3,7 @@ package com.example.demo;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.managedbots.InMemoryManagedBotStore;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
+import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotService;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotTokenStore;
 import io.github.dev_abdulhay.telegramauth.managedbots.TelegramManagedBotsAutoConfiguration;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TelegramWhiteLabelAutoConfiguration;
@@ -99,6 +100,34 @@ class WhiteLabelAutoConfigTest {
             // the bridge must beat managed-bots' no-op ManagedBotEvents
             assertThat(ctx.getBean(ManagedBotEvents.class)).isInstanceOf(TenantBotEventBridge.class);
         });
+    }
+
+    /**
+     * A host's own {@code ManagedBotEvents} used to be a startup failure: the
+     * bridge's {@code @ConditionalOnMissingBean} resolves against
+     * {@code TenantBotEventBridge}, so both beans were registered and
+     * {@code ManagedBotService}'s injection point saw two candidates. The bridge is
+     * {@code @Primary} now, so the service resolves to it and the host's bean is an
+     * extension point rather than a collision.
+     */
+    @Test
+    void aHostsOwnEventsBeanIsAnExtensionPointNotACollision() {
+        runner.withPropertyValues("telegram.white-label.enabled=true")
+                .withUserConfiguration(HostEvents.class)
+                .run(ctx -> {
+                    assertThat(ctx).hasNotFailed();
+                    assertThat(ctx.getBeansOfType(ManagedBotEvents.class)).hasSize(2);
+                    assertThat(ctx.getBean(ManagedBotEvents.class))
+                            .isInstanceOf(TenantBotEventBridge.class);
+                    assertThat(ctx).hasSingleBean(ManagedBotService.class);
+                });
+    }
+
+    @TestConfiguration
+    static class HostEvents {
+        @Bean ManagedBotEvents hostEvents() {
+            return new ManagedBotEvents() { };
+        }
     }
 
     @Test

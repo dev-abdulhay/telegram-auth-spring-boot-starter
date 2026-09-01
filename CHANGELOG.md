@@ -96,9 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bot lifecycle into runtime lifecycle — created starts, token-rotated
   restarts, decommissioned stops — swallowing and logging each failure so one
   bad tenant cannot disturb the manager bot or the others. When the runtime is
-  on, **the library owns the `ManagedBotEvents` bean**; a host declaring its own
-  collides with the bridge rather than replacing it, so per-bot wiring belongs
-  in `ManagedBotCustomizer`.
+  on the bridge is the `@Primary` `ManagedBotEvents` bean, so a host declaring
+  its own does not replace it — the bridge forwards every callback on to the
+  host's bean after the registry work. Per-bot wiring still belongs in
+  `ManagedBotCustomizer`.
 - `TenantBotLifecycle<U, S>`: starts every stored bot on `ApplicationReadyEvent`
   (each independently, so one unusable row costs only that tenant) and stops
   them all on `@PreDestroy`.
@@ -176,6 +177,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that window got nothing: no row, no `onCreated`, and — under the white-label
   runtime — no tenant bot, until the window expired. The guard is now one-shot,
   matching `rotateToken`.
+- **A host's own `ManagedBotEvents` bean no longer collides with the white-label
+  event bridge.** `TenantBotEventBridge` was registered under a
+  `@ConditionalOnMissingBean` resolving against its own type, so a host that
+  declared a `ManagedBotEvents` bean ended up with two candidates and a context
+  that failed with `NoUniqueBeanDefinitionException`. The bridge is `@Primary`
+  now, and forwards all four callbacks to any host-declared `ManagedBotEvents`
+  **after** doing its registry work — so a host hook cannot keep a tenant from
+  starting, and its exceptions are swallowed and logged exactly as the
+  registry's are. The bridge filters itself out of that forwarding, so it never
+  calls itself. Previously documented as an unavoidable startup failure; it is
+  an extension point.
 - **A tenant bot with a blank stored token no longer looks healthy.** An empty
   decrypt yields `Optional.of("")`, which passed the registry's no-token check;
   the runner then declined to poll and returned, while `TenantBotRegistry.start`
