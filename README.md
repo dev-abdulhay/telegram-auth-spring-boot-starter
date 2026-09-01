@@ -921,6 +921,21 @@ were, so nothing changes for a statically configured host. If you implement
 note the two added methods: `findByTokenHashAndBotUserId` and
 `findWithLockByTokenHashAndBotUserId`.
 
+> **Migrating an existing deployment: drain the in-flight logins first.** The
+> tenant-scoped queries match on `bot_user_id = ?`, and a `NULL` never satisfies
+> that. So every live (`PENDING` / `AWAITING_CODE`) session your *statically*
+> configured bot already wrote — all of which carry a `NULL` `bot_user_id` —
+> becomes invisible to the tenant modules the moment you switch a deployment over
+> to managed bots. Those logins cannot be approved, rejected or completed; they
+> simply sit there until they pass their `sessionTtl` (5 minutes by default) and
+> expire. Nothing is corrupted and no data is lost, but the users holding them
+> have to start over.
+>
+> The clean cut-over is therefore to stop accepting new logins, let the in-flight
+> ones drain or expire — one `sessionTtl` is the longest you can wait, since that
+> is how long a live row stays useful — and only then start the tenant bots.
+> Deleting or expiring the leftover live rows outright does the same job faster.
+
 ### Configuration
 
 | Property | Default | Purpose |
