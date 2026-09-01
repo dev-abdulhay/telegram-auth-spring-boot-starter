@@ -5,7 +5,6 @@ import io.github.dev_abdulhay.telegramauth.managedbots.InMemoryManagedBotStore;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotTokenStore;
 import io.github.dev_abdulhay.telegramauth.managedbots.TelegramManagedBotsAutoConfiguration;
-import io.github.dev_abdulhay.telegramauth.whitelabel.RunningBot;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TelegramWhiteLabelAutoConfiguration;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TenantBotEventBridge;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TenantBotFactory;
@@ -39,9 +38,7 @@ class WhiteLabelAutoConfigTest {
             return new InMemoryManagedBotStore();
         }
         @Bean TenantBotFactory<DemoUser, DemoSession> factory() {
-            return (bot, token) -> new RunningBot<>(
-                    TelegramBotModule.builder(token, bot.username()).botUserId(bot.botUserId()).build(),
-                    null);
+            return NEVER_CALLED;
         }
     }
 
@@ -68,11 +65,19 @@ class WhiteLabelAutoConfigTest {
             return TelegramBotModule.builder("123:ABC", "manager_bot").build();
         }
         @Bean TenantBotFactory<DemoUser, DemoSession> factory() {
-            return (bot, token) -> new RunningBot<>(
-                    TelegramBotModule.builder(token, bot.username()).botUserId(bot.botUserId()).build(),
-                    null);
+            return NEVER_CALLED;
         }
     }
+
+    // No context in this class ever starts a tenant bot, so the factory bean only
+    // has to exist. Saying that outright beats a fixture that looks like a real
+    // factory: RunningBot rejects a null session service, so any body written here
+    // would have to be genuine, and the one that used to stand here would have
+    // thrown NPE the moment anything called it.
+    private static final TenantBotFactory<DemoUser, DemoSession> NEVER_CALLED =
+            (bot, token) -> {
+                throw new UnsupportedOperationException("not invoked in this test");
+            };
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(
