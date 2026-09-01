@@ -109,9 +109,36 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
                         ipAddress, botUserId, LIVE_STATUSES, now);
     }
 
+    /**
+     * The session for this token, scoped to the module's tenant when it has one.
+     * A statically configured module looks across the whole table, which is the
+     * pre-white-label behaviour and must not change.
+     *
+     * <p>The scoping is what makes the {@code bot_user_id} column a boundary
+     * rather than a label. Without it a token minted by tenant A resolves through
+     * tenant B's service, and every terminal transition below would then publish
+     * on B's {@code AuthEventBus} — A's browser waits forever while the row reads
+     * APPROVED. Not an escalation (the token is a secret and the Telegram
+     * identity is genuine), but it is exactly the isolation this feature promises.
+     */
+    private Optional<S> byTokenHash(String tokenHash) {
+        Long botUserId = module.getBotUserId();
+        return (botUserId == null)
+                ? sessionRepo.findByTokenHash(tokenHash)
+                : sessionRepo.findByTokenHashAndBotUserId(tokenHash, botUserId);
+    }
+
+    /** {@link #byTokenHash} with the row locked; see there for why the scoping exists. */
+    private Optional<S> lockedByTokenHash(String tokenHash) {
+        Long botUserId = module.getBotUserId();
+        return (botUserId == null)
+                ? sessionRepo.findWithLockByTokenHash(tokenHash)
+                : sessionRepo.findWithLockByTokenHashAndBotUserId(tokenHash, botUserId);
+    }
+
     @Transactional(readOnly = true)
     public Optional<S> findByRawToken(String rawToken) {
-        return sessionRepo.findByTokenHash(tokenGenerator.hash(rawToken));
+        return byTokenHash(tokenGenerator.hash(rawToken));
     }
 
     public String hash(String rawToken) {
@@ -132,7 +159,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
      */
     @Transactional
     public boolean approve(String tokenHash, U user) {
-        S s = sessionRepo.findWithLockByTokenHash(tokenHash).orElse(null);
+        S s = lockedByTokenHash(tokenHash).orElse(null);
         if (s == null || !LIVE_STATUSES.contains(s.getStatus())) {
             log.debug("approve: session not found or no longer live");
             return false;
@@ -179,7 +206,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
      */
     @Transactional
     public boolean awaitCode(String tokenHash) {
-        S s = sessionRepo.findWithLockByTokenHash(tokenHash).orElse(null);
+        S s = lockedByTokenHash(tokenHash).orElse(null);
         if (s == null || s.getStatus() != Status.PENDING) {
             log.debug("awaitCode: session not found or not pending");
             return false;
@@ -199,7 +226,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
     /** @return {@code true} if a live (PENDING or AWAITING_CODE) session was rejected. */
     @Transactional
     public boolean reject(String tokenHash) {
-        S s = sessionRepo.findWithLockByTokenHash(tokenHash).orElse(null);
+        S s = lockedByTokenHash(tokenHash).orElse(null);
         if (s == null || !LIVE_STATUSES.contains(s.getStatus())) return false;
         s.setStatus(Status.REJECTED);
         sessionRepo.save(s);
