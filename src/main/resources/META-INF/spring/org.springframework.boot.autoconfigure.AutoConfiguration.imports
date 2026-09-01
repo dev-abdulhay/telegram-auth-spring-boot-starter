@@ -1,2 +1,3 @@
 io.github.dev_abdulhay.telegramauth.config.TelegramAuthAutoConfiguration
 io.github.dev_abdulhay.telegramauth.managedbots.TelegramManagedBotsAutoConfiguration
+io.github.dev_abdulhay.telegramauth.whitelabel.TelegramWhiteLabelAutoConfiguration

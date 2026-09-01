@@ -200,6 +200,7 @@ CREATE TABLE admin_tg_session (
     id                BIGSERIAL PRIMARY KEY,
     token_hash        VARCHAR(64)  NOT NULL UNIQUE,
     telegram_user_id  BIGINT,
+    bot_user_id       BIGINT,       -- NULL unless the module carries a bot id
     status            VARCHAR(20)  NOT NULL,
     ip_address        VARCHAR(45),
     user_agent        VARCHAR(500),
@@ -215,6 +216,13 @@ CREATE TABLE admin_tg_session (
 > the existing `status VARCHAR(20)` column, and the confirmation code is derived
 > from `token_hash` rather than stored. If your DDL constrains `status` with a
 > `CHECK` or an enum type, add `AWAITING_CODE` to it.
+
+> **`bot_user_id` is additive and nullable.** Existing tables need
+> `ALTER TABLE … ADD COLUMN bot_user_id BIGINT` and nothing else — no backfill.
+> It stays `NULL` for every session created by a statically configured module,
+> which keeps the table-wide rate-limit behaviour unchanged. Only [white-label
+> tenant bots](#white-label-tenant-bots) populate it, and those hosts should
+> index `ip_address,bot_user_id,status` instead of `ip_address,status`.
 
 That's the whole module. The auto-config discovers every `TelegramBotModule`
 bean and starts one independent long-poll loop per module.
@@ -749,6 +757,376 @@ already has. Telegram caps the list at 10 users and ignores it entirely when
   `TelegramBotModule.builder(token, username).bot(new TelegramBot(httpClient,
   token, "https://api.telegram.org", Duration.ofSeconds(5)))`.
 
+## White-label tenant bots
+
+Managed bots *create* a tenant's bot and keep custody of its token; the
+**white-label runtime** actually *runs* it — one long-poll loop, one
+`TelegramBotModule` and one session service per tenant, so every tenant
+authenticates its own users through its own branded bot. It is a second opt-in
+layer **on top of** managed bots: `telegram.managed-bots.enabled` must be `true`
+as well, because the runtime is built out of `ManagedBotService` and
+`ManagedBotTokenStore`, and neither exists otherwise.
+
+### The factory the host implements
+
+The library cannot build a tenant's session service by itself —
+`AbstractSessionService` and `DefaultAuthFlow` are generic over the host's own
+user and session entities, which the library never sees. So the host declares
+exactly one `TenantBotFactory` bean:
+
+```java
+@FunctionalInterface
+public interface TenantBotFactory<U extends BaseTelegramUser, S extends BaseAuthSession> {
+    RunningBot<U, S> create(ManagedBot bot, String decryptedToken);
+}
+```
+
+`RunningBot` is the pair the registry keeps — the module to poll, and the
+session service it hands back to your REST layer later:
+
+```java
+public record RunningBot<U extends BaseTelegramUser, S extends BaseAuthSession>(
+        TelegramBotModule module, AbstractSessionService<U, S> sessionService) {}
+```
+
+Turning the runtime on without that bean **fails the context at startup** with
+`IllegalStateException: a TenantBotFactory bean is required when
+telegram.white-label.enabled=true` — deliberately, rather than starting an
+application in which no tenant can ever log in.
+
+```java
+@Configuration
+public class TenantRuntimeConfig {
+
+    private final TenantSessionRepository sessions;
+    private final TokenGenerator tokens;
+
+    public TenantRuntimeConfig(TenantSessionRepository sessions, TokenGenerator tokens) {
+        this.sessions = sessions;
+        this.tokens = tokens;
+    }
+
+    // Container-built, prototype-scoped, and it takes the tenant's module as its
+    // ONLY parameter. All three matter — see the warning below.
+    @Bean
+    @Scope("prototype")
+    TenantSessionService tenantSessionService(TelegramBotModule module) {
+        return new TenantSessionService(sessions, tokens, module);
+    }
+
+    @Bean
+    TenantBotFactory<TenantUser, TenantSession> tenantBotFactory(
+            ObjectProvider<TenantSessionService> sessionServices,
+            TenantUserService users,
+            DefaultAuthFlow.Options options,
+            JwtService jwt) {
+
+        return (bot, decryptedToken) -> {
+            TelegramBotModule module = TelegramBotModule.builder(decryptedToken, bot.username())
+                    .botUserId(bot.botUserId())                  // required — see below
+                    .approveHandler((info, ctx) -> new AuthApproveResult(Map.of(
+                            "accessToken", jwt.issue(info.telegramId()),
+                            "tenant", bot.botUserId())))
+                    .sessionTtl(Duration.ofMinutes(5))
+                    .build();
+
+            // getObject(module) is what carries this tenant's module into the
+            // prototype — plain getObject() would autowire the manager module.
+            TenantSessionService service = sessionServices.getObject(module);
+
+            new DefaultAuthFlow<>(users, service, module, options);   // registers /start
+            return new RunningBot<>(module, service);
+        };
+    }
+}
+```
+
+`TenantSessionService` and `TenantUserService` are ordinary subclasses of
+`AbstractSessionService<TenantUser, TenantSession>` and
+`AbstractTelegramUserService<TenantUser>`, written exactly as in [Build a
+module](#build-a-module). Building `DefaultAuthFlow` with `new` is fine — it
+carries no `@Transactional` and delegates every write to the session service.
+
+> ### ⚠️ Three separate requirements hide in that `@Bean`
+>
+> They are commonly stated as one rule about prototype scope. They are not one
+> rule: each has a different cause and a different failure.
+>
+> **1. Container-managed — never a plain `new`.** A hand-built service is not a
+> Spring bean, so it gets no AOP proxy. `@Transactional` then silently does
+> nothing: the `PESSIMISTIC_WRITE` lock in `findWithLockByTokenHash` is released
+> the moment its query returns instead of serialising concurrent
+> `approve`/`reject` transitions, and `publishAfterCommit` falls through to its
+> "no transaction active" branch. This has **nothing to do with scope** — the
+> proxy is applied by a `BeanPostProcessor`, which runs on every
+> container-managed instance whatever its scope. It compiles, it runs, it passes
+> a smoke test; it only corrupts data under concurrency.
+>
+> **2. Prototype-scoped — never singleton.** A different failure with a
+> different cause. `AbstractSessionService` holds one tenant's
+> `TelegramBotModule` in a final field and reads `getBotUserId`, `getSessionTtl`,
+> `getMaxPendingPerIp`, `getApproveHandler` and `getBus` from it. A singleton is
+> created once and returned for every tenant after the first, freezing the
+> **first** tenant's module — tenant B mints tokens against tenant A's bot,
+> publishes to tenant A's event bus, and draws on tenant A's rate-limit bucket.
+>
+> This one is caught rather than suffered: `TenantBotRegistry#start`
+> compares the object the factory returned against the ones it already holds and
+> throws `IllegalStateException` if a second tenant is handed the same session
+> service or module. The second tenant fails to start, loudly, instead of quietly
+> running on the first tenant's identity. It is a backstop, not a substitute for
+> getting the scope right — it only fires once two tenants are live.
+>
+> **3. Prototype scope alone is not enough — the module has to reach the bean.**
+> Declare the `@Bean` method so the module is a construction argument and pass it
+> with `ObjectProvider#getObject(args)`. Spring matches explicit arguments
+> against the factory method's *whole* parameter list, so the `@Bean` method must
+> take the module **and nothing else**; a method like
+> `tenantSessionService(repo, tokens, module)` called as `getObject(module)`
+> fails with `BeanCreationException: … Illegal arguments to factory method`.
+> Inject the other dependencies into the `@Configuration` class instead, as
+> above.
+
+### `.botUserId(bot.botUserId())` is not optional
+
+The module builder's `botUserId` is what stamps the tenant onto every session
+row, and what every tenant-scoped query keys off. Leave it out and the module
+still works — it polls, logins succeed — but `AbstractSessionService#create`
+writes a `null` `bot_user_id`, and the service falls back to its table-wide
+behaviour on both counts below.
+
+**Rate limiting.** Every tenant then shares **one** `maxPendingPerIp` bucket, so
+a flood against one tenant locks logins for all of them, and no session can
+afterwards be attributed to the bot that created it.
+
+**Session lookup.** With a bot id set, `findByRawToken`, `approve`, `awaitCode`
+and `reject` resolve the session by `token_hash` **and** `bot_user_id`, so a
+token minted by tenant A simply does not exist as far as tenant B's service is
+concerned. Without it, one tenant's service will happily complete another's
+session — and publish the terminal event on the wrong bot's `AuthEventBus`,
+leaving the browser that started the login waiting forever on a session the
+database already shows as `APPROVED`.
+
+A module with no bot id keeps the original unscoped queries exactly as they
+were, so nothing changes for a statically configured host. If you implement
+`BaseAuthSessionRepository` by hand rather than letting Spring Data derive it,
+note the two added methods: `findByTokenHashAndBotUserId` and
+`findWithLockByTokenHashAndBotUserId`.
+
+### Configuration
+
+| Property | Default | Purpose |
+|----------|---------|---------|
+| `telegram.white-label.enabled` | `false` | Opt-in switch for the whole runtime; the auto-configuration stays inert when false. |
+| `telegram.white-label.restore-on-startup` | `true` | Start every stored tenant bot on `ApplicationReadyEvent`. Each bot is attempted independently — one bad row costs that tenant only. |
+| `telegram.white-label.poll-failure-budget` | `5m` | How long a tenant bot may fail to poll *continuously* before it is stopped and deregistered. Measured in time, not attempts, so a brief outage never kills a healthy bot. |
+
+```yaml
+telegram:
+  managed-bots:
+    enabled: true                 # required — the runtime is built on top of it
+    encryption-key: "BASE64_ENCODED_32_BYTE_KEY"
+  white-label:
+    enabled: true
+    restore-on-startup: true
+    poll-failure-budget: 5m
+```
+
+### Routing a login to the right tenant
+
+The library does not resolve tenants — it has no idea whether yours arrive by
+subdomain, header, path segment or JWT claim. The host resolves its own tenant,
+maps it to a `botUserId`, and asks the registry for that tenant's session
+service:
+
+```java
+@RestController
+@RequestMapping("/api/auth")
+public class TenantAuthController {
+
+    private final TenantBotRegistry<TenantUser, TenantSession> registry;
+    private final TenantLookup tenants;   // yours: subdomain / header / path -> botUserId
+
+    private AbstractSessionService<TenantUser, TenantSession> serviceFor(HttpServletRequest req) {
+        long botUserId = tenants.resolve(req);
+        return registry.sessionServiceFor(botUserId).orElseThrow(() ->
+                new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "bot " + botUserId + " is not running"));
+    }
+}
+```
+
+`sessionServiceFor(long botUserId)` returns
+`Optional<AbstractSessionService<U, S>>` and is **empty for any bot that is not
+currently running** — never created, still starting, stopped, decommissioned, or
+dropped after exhausting its poll-failure budget. Treat the empty case as a real
+runtime state, not a programming error. `registry.running()` returns the ids
+currently polling, which makes a useful health endpoint.
+
+The built-in `AbstractTelegramAuthController` cannot serve tenants as-is: it
+takes one `AbstractSessionService` and one `TelegramBotModule` in its
+constructor, fixed for the life of the bean. A white-label host writes its own
+controller that resolves both per request, as sketched above.
+
+### Adding a tenant's own commands
+
+`ManagedBotCustomizer` runs against each bot the runtime has just built, right
+after the auth flow registered its handlers:
+
+```java
+@Bean
+ManagedBotCustomizer supportCommands(SupportService support) {
+    return (module, bot) -> module.command("/support", update ->
+            support.openTicket(bot.botUserId(), update));
+}
+```
+
+Commands are free to register. The **single-slot** handlers are not: the auth
+flow may already own them, and registering a second one throws
+`IllegalStateException` rather than silently replacing it.
+
+| Slot | Claimed by `DefaultAuthFlow` when |
+|------|-----------------------------------|
+| `onCallbackQuery` | `requireApproval(true)`, **or** `codeConfirmation` is anything but `OFF` — so by default (`BUTTON`) it is already taken |
+| `onContact` | `requireContact(true)` (which also registers a `/skip` command) |
+| `onText` | `codeConfirmation(TYPED)` |
+
+Anything that collides goes through `module.fallback(...)`, which the flow feeds
+every update it does not own — callbacks outside its `tgauth:` namespace,
+contacts with no login in progress, and, in `TYPED` mode, text it cannot use.
+Note `fallback` also receives **unregistered `/commands`**: once the command
+registry misses, the dispatcher cannot tell them from ordinary text.
+
+### Rotation and restart costs
+
+A token rotation cannot be applied in place — `TelegramBot` holds its token in a
+final field — so `TenantBotRegistry#restart(ManagedBot)` stops the old runner and
+builds a new one. Two costs come with every restart of a tenant, whether it is a
+rotation, a manual `restart`, or an application redeploy:
+
+- **In-flight logins on that tenant are lost.** The flow's pending-login state is
+  a JVM-local map, not persisted; stopping the runner discards it. Users
+  mid-login simply start again.
+- **Telegram may redeliver.** The new runner polls from offset 0, so updates the
+  old runner had received but never confirmed by advancing past them can arrive a
+  second time.
+
+Only the rotated tenant is affected — the other tenants keep polling.
+
+### When a token dies
+
+A tenant bot that fails to poll for the whole `poll-failure-budget` without a
+single success is stopped and dropped from the registry, and a warning is logged.
+`sessionServiceFor` goes empty for it from that moment.
+
+> **A poll failure is not proof of a revoked token.** The runner gives up through
+> the same path for an unparseable payload and for a `409` from a competing
+> poller (another instance of your application on the same token) as it does for
+> a revoked one. The budget is measured in *time* rather than attempts precisely
+> so a brief network outage cannot kill a healthy bot — but the log line says
+> "probably revoked", and it means probably.
+
+Deregistration is in-memory only: the bot's row and encrypted token are still in
+your `ManagedBotTokenStore`, so bringing it back needs no re-creation. Any of
+these does it:
+
+- The owner issues a fresh token in BotFather. Telegram sends the manager a
+  `managed_bot` update, `ManagedBotService` re-fetches and re-stores it and fires
+  `onTokenRotated`, and the bridge restarts the bot — no host code at all.
+- The host calls `ManagedBotService#fetchAndStore(botUserId, ownerUserId)`, which
+  publishes the same event and so reaches the registry the same way.
+- The host calls `registry.start(bot)` itself, or restarts the application with
+  `restore-on-startup: true`.
+
+If the token really is dead, the bot starts, fails for another budget and drops
+out again — so back off between attempts rather than looping.
+
+### Threading, and the honest ceiling
+
+Every running tenant bot costs **two platform threads**: one poll thread
+(`tg-auth-poll-<username>`) and one single-threaded update worker
+(`tg-auth-work-<username>`). Both are daemon threads. At a few dozen tenants that
+is unremarkable; at several hundred it is not.
+
+On Java 21+ a host can hand the runtime a virtual-thread factory, and both pools
+use it:
+
+```java
+@Bean
+ThreadFactory tenantThreadFactory() {
+    return Thread.ofVirtual().name("tg-tenant-", 0).factory();
+}
+```
+
+**The library itself stays on Java 17 and never references a virtual-thread
+API** — the seam is a plain `java.util.concurrent.ThreadFactory`, and the
+decision is entirely the host's.
+
+Three things to know before reaching for it:
+
+- **Supplying a factory erases the name distinction.** The supplied factory is
+  used as-is for *both* pools — it owns its threads' names and daemon status — so
+  `tg-auth-poll-` and `tg-auth-work-` disappear from thread dumps. Operators lose
+  the ability to tell a stuck poll from a stuck handler at a glance. That is a
+  real diagnostic cost, not a cosmetic one. (The runtime could not re-flag those
+  threads even if it wanted to: on a virtual thread `setDaemon(false)` throws
+  outright, and `setDaemon(true)` is a no-op that only looks like it worked.)
+- **The registry resolves the factory with `getIfAvailable()`, so declare at most
+  one.** Two `ThreadFactory` beans in the context fail startup with
+  `NoUniqueBeanDefinitionException: … expected single matching bean but found 2`.
+  If your application already has one for unrelated work, mark one `@Primary` or
+  keep the runtime on the built-in default.
+- **One *unrelated* `ThreadFactory` bean is the case that actually bites**, and it
+  is silent. `getIfAvailable()` cannot tell a factory meant for the bot pools from
+  one you declared for a scheduler or a batch job: it finds the single candidate
+  and adopts it for both pools of every tenant bot. There is no error, no warning,
+  and nothing in the logs — the only symptom is that `tg-auth-poll-*` and
+  `tg-auth-work-*` are simply not in the thread dump, and your bots are running on
+  someone else's threads. There is no way to tell the runtime "use the built-in
+  default anyway": if a `ThreadFactory` bean is visible, it wins. So if the one in
+  your context was not meant for the bots, keep it out of the candidate pool —
+  declare it as a narrower type, or qualify it behind your own configuration
+  instead of exposing it as a bare `ThreadFactory` bean.
+
+**The practical ceiling is untested.** No load test in this repository establishes
+how many tenant bots one instance can carry, and threads are probably not the
+binding constraint anyway: each bot holds a *simultaneous long-poll HTTP
+connection* to Telegram from one address, and connection limits — your HTTP
+client's pool, and Telegram's own tolerance for concurrent pollers from one IP —
+will bite before thread count does. Measure it for your deployment; do not read a
+number into this section, because there isn't one.
+
+### The library owns the `ManagedBotEvents` bean
+
+When the runtime is on, `TenantBotEventBridge` **is** the `ManagedBotEvents`
+bean: the white-label auto-configuration is ordered before the managed-bots one
+so its bridge wins the `@ConditionalOnMissingBean`, and `ManagedBotService` is
+wired with it. That is what turns bot lifecycle into runtime lifecycle — created
+starts, token-rotated restarts, decommissioned stops, each failure swallowed and
+logged so one bad tenant cannot disturb the manager bot or the others.
+
+So a host **cannot** also declare its own `ManagedBotEvents` bean: the context
+fails with `NoUniqueBeanDefinitionException … found 2: yourEvents,
+tenantBotEventBridge`. Per-bot wiring belongs in `ManagedBotCustomizer`; anything
+else you need from the lifecycle you can do inside the `TenantBotFactory`, which
+runs on every start.
+
+### Single instance only
+
+`TenantBotRegistry` is JVM-local and single-instance by design. Nothing here
+attempts ownership, leasing or coordination, because **two application instances
+polling the same bot collide**: Telegram answers `409 Conflict` and updates go to
+whichever poller wins each race.
+
+> **Do not scale this horizontally.** Running two instances with
+> `telegram.white-label.enabled=true` against the same token store is not a
+> degraded configuration, it is a broken one — updates are dropped, in-flight
+> logins are split across instances that cannot see each other's pending state,
+> and the resulting poll failures look exactly like revoked tokens. A
+> multi-instance deployment needs a lease or a webhook design first; both are
+> explicitly out of scope for this release. Run exactly one instance with
+> `telegram.white-label.enabled=true`.
+
 ## Status & roadmap
 
 > **MVP.** Long-polling transport, in-memory per-module event bus, single
@@ -759,6 +1137,7 @@ already has. Telegram caps the list at 10 users and ignores it entirely when
 - [x] Contact-share + Approve/Reject inline keyboard (opt-in `Options`), 3-language bot texts.
 - [x] Number matching (`codeConfirmation`) with per-user cooldown, and flow options bindable from YAML.
 - [x] Managed bots (opt-in): `/newbot` deep link, encrypted token custody, lifecycle events, access settings, decommission.
+- [x] White-label tenant bots (opt-in): a long-poll runtime per managed bot, per-tenant rate limiting, startup restore, poll-failure budget. Single instance only.
 - [ ] SSE & WebSocket transports.
 - [ ] Redis-backed event bus + multi-instance horizontal scaling (would also make in-flight login state survive failover).
 
