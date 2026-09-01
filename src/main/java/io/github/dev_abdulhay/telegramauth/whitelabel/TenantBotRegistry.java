@@ -97,8 +97,10 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
      * callers, must not double the polling, which would draw a 409 against our
      * own other poller and drop updates neither side confirms.
      *
-     * @throws IllegalStateException if no token is stored for the bot; the registry
-     *                                is left unchanged
+     * @throws IllegalStateException if no token is stored for the bot, if the
+     *                                factory handed back an instance another live
+     *                                tenant already holds, or if the runner did not
+     *                                begin polling; the registry is left unchanged
      */
     public void start(ManagedBot bot) {
         long id = bot.botUserId();
@@ -112,6 +114,7 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
             String token = managedBots.findToken(id).orElseThrow(() -> new IllegalStateException(
                     "no stored token for managed bot " + id + "; cannot start it"));
             RunningBot<U, S> built = factory.create(bot, token);
+            rejectSharedInstance(id, built);
             if (customizer != null) {
                 customizer.customize(built.module(), bot);
             }
@@ -130,7 +133,15 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
                                 + "its token was probably revoked", id, failingFor.toSeconds());
                         running.remove(id, reservation);
                     });
-            runner.start();
+            if (!runner.start()) {
+                // A blank stored token leaves the runner constructed but silent. It
+                // would otherwise be published as healthy and never poll, never fail,
+                // and so never spend its failure budget — a permanently dead tenant
+                // that every health check reports as fine. The token itself is never
+                // named here, only the bot id.
+                throw new IllegalStateException("tenant bot " + id
+                        + " did not start polling; its stored token is blank or unusable");
+            }
             reservation.entry = new Entry<>(built, runner);
             started = true;
             log.info("tenant bot {} (@{}) started", id, built.module().getUsername());
@@ -139,6 +150,40 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
                 running.remove(id, reservation);
             }
         }
+    }
+
+    /**
+     * Refuses a {@link TenantBotFactory} that handed back an object another live
+     * tenant already holds. A host wiring its session service as a singleton
+     * instead of a prototype gets the <em>same</em> service — and therefore the
+     * same {@code TelegramBotModule}, token, {@code AuthEventBus} and rate-limit
+     * scope — for every tenant after the first. Nothing downstream can tell that
+     * apart from correct wiring: logins keep working, they just cross tenants.
+     *
+     * <p>Compares by identity, not equality: two distinct services are correct
+     * even when they are built the same way, and only sharing is the defect.
+     * O(n) over live entries, once per bot start, with n bounded by tenant count.
+     */
+    private void rejectSharedInstance(long id, RunningBot<U, S> built) {
+        for (Map.Entry<Long, Slot<U, S>> e : running.entrySet()) {
+            if (e.getKey() == id) continue;
+            Entry<U, S> live = e.getValue().entry;
+            if (live == null) continue;
+            // null-guarded: a factory may legitimately leave either field null, and
+            // two nulls are not a shared instance
+            if (sameInstance(live.bot().sessionService(), built.sessionService())
+                    || sameInstance(live.bot().module(), built.module())) {
+                throw new IllegalStateException("the TenantBotFactory returned the same instance for "
+                        + "tenant bots " + e.getKey() + " and " + id + "; each tenant needs its own "
+                        + "session service and module, so resolve them as prototype-scoped beans "
+                        + "(through an ObjectProvider) instead of injecting a singleton — sharing "
+                        + "one instance leaks tokens, auth events and rate-limit state across tenants");
+            }
+        }
+    }
+
+    private static boolean sameInstance(Object a, Object b) {
+        return a != null && a == b;
     }
 
     /**
@@ -152,10 +197,23 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
      * {@link #running()}, {@link #sessionServiceFor} and to every future
      * {@code stop}/{@code stopAll}, and inviting a second poller on the same token
      * the next time {@code start} is called for this id.
+     *
+     * <p>Dropping a stop is safe but not harmless, so it is logged at WARN rather
+     * than swallowed. The case that bites is a rotation: if startup restore has
+     * already read the pre-rotation token and is still inside its reservation
+     * window, the {@code restart} that would have applied the new token is
+     * dropped, and the bot polls a revoked token until the failure budget
+     * deregisters it minutes later. An operator needs to be able to see that.
      */
     public void stop(long botUserId) {
         Slot<U, S> slot = running.get(botUserId);
-        if (slot == null || slot.entry == null) return;
+        if (slot == null) return;
+        if (slot.entry == null) {
+            log.warn("stop for tenant bot {} was dropped: a start for it is still in flight. "
+                    + "If this was a token rotation, the bot is still polling the old token; "
+                    + "restart it once the start has finished.", botUserId);
+            return;
+        }
         if (!running.remove(botUserId, slot)) return;
         slot.entry.runner().stop();
         log.info("tenant bot {} stopped", botUserId);
@@ -192,8 +250,20 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
                 .collect(Collectors.toUnmodifiableSet());
     }
 
-    /** Stops every tenant bot. */
+    /**
+     * Stops every tenant bot.
+     *
+     * <p>Two passes, because {@link #stop} deliberately leaves an unpublished
+     * reservation alone: a bot whose {@code start()} was still mid-flight during
+     * the first pass would otherwise be left polling after the registry had
+     * declared everything stopped. The second pass catches the ones that finished
+     * in between. It is not a barrier — a start beginning after the second pass is
+     * still missed — but it closes the window that {@code @PreDestroy} on a live
+     * context actually hits, where the alternative is a poller that outlives the
+     * context that owns it.
+     */
     public void stopAll() {
+        running.keySet().forEach(this::stop);
         running.keySet().forEach(this::stop);
     }
 }
