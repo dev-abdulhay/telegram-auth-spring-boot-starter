@@ -220,6 +220,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `onCreated` — making the documented "left unreachable by us" promise false.
   The service now keeps a bounded, 5-minute, JVM-local record of the token
   changes it initiated and drops their echoes.
+- **A failed revocation no longer leaves the echo guard armed with nothing to
+  disarm it.** `decommission` arms the guard before calling
+  `replaceManagedBotToken`, because the echo can be in flight before the call
+  returns — but when that call itself throws (the owner already deleted the
+  bot in BotFather), no echo is ever coming. The guard used to sit armed for
+  the rest of its five-minute window regardless, silently swallowing the
+  owner's next genuine `managed_bot` update for that bot — for example,
+  re-creating the same bot fired no `onCreated` and stored no row. A failed
+  revocation now disarms the guard immediately.
 - `ManagedBotService.rotateToken(botUserId)` publishes `onTokenRotated` once
   instead of twice, via the same guard. The rotation suppression is one-shot,
   so a genuinely owner-initiated rotation arriving later is still announced.

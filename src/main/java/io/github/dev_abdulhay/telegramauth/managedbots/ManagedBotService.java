@@ -149,7 +149,10 @@ public class ManagedBotService {
      * and re-create the row we just deleted. The suppression is <b>one-shot</b>:
      * the revocation is one token change and so echoes exactly once, and an owner
      * who re-authorises the same bot moments later is doing something genuine that
-     * must still be treated as a creation.
+     * must still be treated as a creation. If the revocation call itself fails —
+     * for example the owner already deleted the bot in BotFather — no echo is
+     * coming, so the guard is disarmed immediately instead of sitting armed for
+     * the rest of its window and swallowing that same genuine re-creation.
      *
      * <p><b>Lenient about unknown ids</b> — unlike {@link #rotateToken(long)}, which
      * throws. That is deliberate: a bot whose token fetch failed exists on Telegram
@@ -161,6 +164,10 @@ public class ManagedBotService {
             module.getBot().replaceManagedBotToken(botUserId);
         } catch (RuntimeException e) {
             log.warn("could not revoke the token of managed bot {}; forgetting it anyway", botUserId, e);
+            // No echo is coming for a call that never succeeded — leaving the guard
+            // armed would swallow the next genuine managed_bot update for this bot
+            // (e.g. the owner re-creating it) until the TTL ran out.
+            selfInitiated.remove(botUserId);
         }
         store.deleteByBotUserId(botUserId);
         events.onDecommissioned(botUserId);
