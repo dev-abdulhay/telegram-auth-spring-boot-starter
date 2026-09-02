@@ -3,9 +3,9 @@ package com.example.demo;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.managedbots.InMemoryManagedBotStore;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
+import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotService;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotTokenStore;
 import io.github.dev_abdulhay.telegramauth.managedbots.TelegramManagedBotsAutoConfiguration;
-import io.github.dev_abdulhay.telegramauth.whitelabel.RunningBot;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TelegramWhiteLabelAutoConfiguration;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TenantBotEventBridge;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TenantBotFactory;
@@ -39,9 +39,7 @@ class WhiteLabelAutoConfigTest {
             return new InMemoryManagedBotStore();
         }
         @Bean TenantBotFactory<DemoUser, DemoSession> factory() {
-            return (bot, token) -> new RunningBot<>(
-                    TelegramBotModule.builder(token, bot.username()).botUserId(bot.botUserId()).build(),
-                    null);
+            return NEVER_CALLED;
         }
     }
 
@@ -68,11 +66,19 @@ class WhiteLabelAutoConfigTest {
             return TelegramBotModule.builder("123:ABC", "manager_bot").build();
         }
         @Bean TenantBotFactory<DemoUser, DemoSession> factory() {
-            return (bot, token) -> new RunningBot<>(
-                    TelegramBotModule.builder(token, bot.username()).botUserId(bot.botUserId()).build(),
-                    null);
+            return NEVER_CALLED;
         }
     }
+
+    // No context in this class ever starts a tenant bot, so the factory bean only
+    // has to exist. Saying that outright beats a fixture that looks like a real
+    // factory: RunningBot rejects a null session service, so any body written here
+    // would have to be genuine, and the one that used to stand here would have
+    // thrown NPE the moment anything called it.
+    private static final TenantBotFactory<DemoUser, DemoSession> NEVER_CALLED =
+            (bot, token) -> {
+                throw new UnsupportedOperationException("not invoked in this test");
+            };
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(
@@ -94,6 +100,34 @@ class WhiteLabelAutoConfigTest {
             // the bridge must beat managed-bots' no-op ManagedBotEvents
             assertThat(ctx.getBean(ManagedBotEvents.class)).isInstanceOf(TenantBotEventBridge.class);
         });
+    }
+
+    /**
+     * A host's own {@code ManagedBotEvents} used to be a startup failure: the
+     * bridge's {@code @ConditionalOnMissingBean} resolves against
+     * {@code TenantBotEventBridge}, so both beans were registered and
+     * {@code ManagedBotService}'s injection point saw two candidates. The bridge is
+     * {@code @Primary} now, so the service resolves to it and the host's bean is an
+     * extension point rather than a collision.
+     */
+    @Test
+    void aHostsOwnEventsBeanIsAnExtensionPointNotACollision() {
+        runner.withPropertyValues("telegram.white-label.enabled=true")
+                .withUserConfiguration(HostEvents.class)
+                .run(ctx -> {
+                    assertThat(ctx).hasNotFailed();
+                    assertThat(ctx.getBeansOfType(ManagedBotEvents.class)).hasSize(2);
+                    assertThat(ctx.getBean(ManagedBotEvents.class))
+                            .isInstanceOf(TenantBotEventBridge.class);
+                    assertThat(ctx).hasSingleBean(ManagedBotService.class);
+                });
+    }
+
+    @TestConfiguration
+    static class HostEvents {
+        @Bean ManagedBotEvents hostEvents() {
+            return new ManagedBotEvents() { };
+        }
     }
 
     @Test

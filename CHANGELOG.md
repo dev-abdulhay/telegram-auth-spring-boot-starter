@@ -96,9 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bot lifecycle into runtime lifecycle — created starts, token-rotated
   restarts, decommissioned stops — swallowing and logging each failure so one
   bad tenant cannot disturb the manager bot or the others. When the runtime is
-  on, **the library owns the `ManagedBotEvents` bean**; a host declaring its own
-  collides with the bridge rather than replacing it, so per-bot wiring belongs
-  in `ManagedBotCustomizer`.
+  on the bridge is the `@Primary` `ManagedBotEvents` bean, so a host declaring
+  its own does not replace it — the bridge forwards every callback on to the
+  host's bean after the registry work. Per-bot wiring still belongs in
+  `ManagedBotCustomizer`.
 - `TenantBotLifecycle<U, S>`: starts every stored bot on `ApplicationReadyEvent`
   (each independently, so one unusable row costs only that tenant) and stops
   them all on `@PreDestroy`.
@@ -169,6 +170,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by whichever JDK happens to run the build.
 
 ### Fixed
+- **Re-authorising a bot right after decommissioning it is no longer swallowed.**
+  `decommission` registered a *blanket* echo guard, suppressing every
+  `managed_bot` update for that bot for five minutes rather than the single echo
+  its own token revocation produces. An owner who re-created the same bot inside
+  that window got nothing: no row, no `onCreated`, and — under the white-label
+  runtime — no tenant bot, until the window expired. The guard is now one-shot,
+  matching `rotateToken`.
+- **A host's own `ManagedBotEvents` bean no longer collides with the white-label
+  event bridge.** `TenantBotEventBridge` was registered under a
+  `@ConditionalOnMissingBean` resolving against its own type, so a host that
+  declared a `ManagedBotEvents` bean ended up with two candidates and a context
+  that failed with `NoUniqueBeanDefinitionException`. The bridge is `@Primary`
+  now, and forwards all four callbacks to any host-declared `ManagedBotEvents`
+  **after** doing its registry work — so a host hook cannot keep a tenant from
+  starting, and its exceptions are swallowed and logged exactly as the
+  registry's are. The bridge filters itself out of that forwarding, so it never
+  calls itself. Previously documented as an unavoidable startup failure; it is
+  an extension point.
+- **`TenantBotEventBridge`'s self-filter is now proxy-safe.** It picked itself
+  out of the forwarding candidates with `!= this`, which is correct in a stock
+  context — the bridge is a plain bean with no `@Transactional`/`@Async` and
+  nothing proxies it — but a host with a broad auto-proxy creator or aspect
+  whose pointcut matches library classes could get a JDK or CGLIB proxy of the
+  bridge among the candidates instead. `!= this` did not recognise that proxy
+  as itself, so the bridge forwarded into it, the proxy delegated straight
+  back, and it recursed until `StackOverflowError` — caught by the existing
+  guard, but only after a log storm and thousands of `registry.start` calls.
+  The comparison now unwraps Spring AOP proxies first.
 - **A tenant bot with a blank stored token no longer looks healthy.** An empty
   decrypt yields `Optional.of("")`, which passed the registry's no-token check;
   the runner then declined to poll and returned, while `TenantBotRegistry.start`
@@ -201,6 +230,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `onCreated` — making the documented "left unreachable by us" promise false.
   The service now keeps a bounded, 5-minute, JVM-local record of the token
   changes it initiated and drops their echoes.
+- **A failed revocation no longer leaves the echo guard armed with nothing to
+  disarm it.** `decommission` arms the guard before calling
+  `replaceManagedBotToken`, because the echo can be in flight before the call
+  returns — but when that call itself throws (the owner already deleted the
+  bot in BotFather), no echo is ever coming. The guard used to sit armed for
+  the rest of its five-minute window regardless, silently swallowing the
+  owner's next genuine `managed_bot` update for that bot — for example,
+  re-creating the same bot fired no `onCreated` and stored no row. A failed
+  revocation now disarms the guard immediately.
 - `ManagedBotService.rotateToken(botUserId)` publishes `onTokenRotated` once
   instead of twice, via the same guard. The rotation suppression is one-shot,
   so a genuinely owner-initiated rotation arriving later is still announced.

@@ -674,14 +674,23 @@ owning user's Telegram account — the user removes it themselves through
 BotFather.
 
 Revoking is itself a token change, so Telegram sends the manager a
-`managed_bot` update echoing it. `ManagedBotService` suppresses that echo for
-5 minutes per bot; otherwise the update would look like a brand-new bot and
-the service would fetch the fresh token and re-create the row it just deleted.
-The same guard swallows exactly one echo after `rotateToken`, so a rotation
-you initiate fires `onTokenRotated` once rather than twice. **The guard is
-JVM-local and not replicated** (like the flow's pending-login state): on a
-multi-instance deployment an echo delivered to a different instance, or after
-a restart, is still processed as if the owner had done it.
+`managed_bot` update echoing it. `ManagedBotService` swallows that echo;
+otherwise the update would look like a brand-new bot and the service would fetch
+the fresh token and re-create the row it just deleted. `rotateToken` is guarded
+the same way, so a rotation you initiate fires `onTokenRotated` once rather than
+twice.
+
+The guard is **one-shot** — one `replaceManagedBotToken` call echoes once. For
+`decommission`, if that call itself fails (for example the owner already deleted
+the bot in BotFather), no echo is coming, so the guard is disarmed immediately
+rather than left armed; only a revocation that *succeeds* but whose echo is slow
+or never arrives waits out the 5-minute TTL. So an owner who genuinely
+re-authorises a bot you just decommissioned, or rotates one moments after you
+did, is handled normally: the second update is not mistaken for your echo, and
+the bot comes back. **The guard is JVM-local and not replicated** (like
+the flow's pending-login state): on a multi-instance deployment an echo delivered
+to a different instance, or after a restart, is still processed as if the owner
+had done it.
 
 `decommission` is deliberately lenient about ids it does not know — unlike
 `rotateToken`, which throws `IllegalArgumentException`. That is the only way
@@ -700,7 +709,9 @@ the configured retries, encrypt, store, then publish `onCreated` or
 `onTokenRotated`) without needing an update. Unlike `handleUpdate` it
 **throws** `TelegramApiException` on failure instead of publishing
 `onTokenFetchFailed` again, so calling it from inside that callback cannot
-loop:
+loop. Note that `ownerUserId` is **always written** to the row — for a bot the
+store already knows, pass the owner it already holds (the username and first
+name, which this entry point cannot supply, are kept from the existing row):
 
 ```java
 @Bean
@@ -913,6 +924,21 @@ were, so nothing changes for a statically configured host. If you implement
 note the two added methods: `findByTokenHashAndBotUserId` and
 `findWithLockByTokenHashAndBotUserId`.
 
+> **Migrating an existing deployment: drain the in-flight logins first.** The
+> tenant-scoped queries match on `bot_user_id = ?`, and a `NULL` never satisfies
+> that. So every live (`PENDING` / `AWAITING_CODE`) session your *statically*
+> configured bot already wrote — all of which carry a `NULL` `bot_user_id` —
+> becomes invisible to the tenant modules the moment you switch a deployment over
+> to managed bots. Those logins cannot be approved, rejected or completed; they
+> simply sit there until they pass their `sessionTtl` (5 minutes by default) and
+> expire. Nothing is corrupted and no data is lost, but the users holding them
+> have to start over.
+>
+> The clean cut-over is therefore to stop accepting new logins, let the in-flight
+> ones drain or expire — one `sessionTtl` is the longest you can wait, since that
+> is how long a live row stays useful — and only then start the tenant bots.
+> Deleting or expiring the leftover live rows outright does the same job faster.
+
 ### Configuration
 
 | Property | Default | Purpose |
@@ -1096,20 +1122,36 @@ client's pool, and Telegram's own tolerance for concurrent pollers from one IP �
 will bite before thread count does. Measure it for your deployment; do not read a
 number into this section, because there isn't one.
 
-### The library owns the `ManagedBotEvents` bean
+### `TenantBotEventBridge` takes over `ManagedBotEvents` — and forwards to yours
 
-When the runtime is on, `TenantBotEventBridge` **is** the `ManagedBotEvents`
-bean: the white-label auto-configuration is ordered before the managed-bots one
-so its bridge wins the `@ConditionalOnMissingBean`, and `ManagedBotService` is
-wired with it. That is what turns bot lifecycle into runtime lifecycle — created
-starts, token-rotated restarts, decommissioned stops, each failure swallowed and
-logged so one bad tenant cannot disturb the manager bot or the others.
+When the runtime is on, `TenantBotEventBridge` is the `ManagedBotEvents`
+`ManagedBotService` is wired with: the white-label auto-configuration is ordered
+before the managed-bots one, so its bridge wins the `@ConditionalOnMissingBean`
+that would otherwise register a no-op, and the bridge is `@Primary` so it stays
+the one candidate the service resolves to. That is what turns bot lifecycle into
+runtime lifecycle — created starts, token-rotated restarts, decommissioned stops,
+each failure swallowed and logged so one bad tenant cannot disturb the manager
+bot or the others.
 
-So a host **cannot** also declare its own `ManagedBotEvents` bean: the context
-fails with `NoUniqueBeanDefinitionException … found 2: yourEvents,
-tenantBotEventBridge`. Per-bot wiring belongs in `ManagedBotCustomizer`; anything
-else you need from the lifecycle you can do inside the `TenantBotFactory`, which
-runs on every start.
+**You can still declare your own `ManagedBotEvents` bean.** It is not shadowed:
+the bridge is handed every `ManagedBotEvents` in the context and hands each of
+the four callbacks — `onCreated`, `onTokenRotated`, `onDecommissioned`,
+`onTokenFetchFailed` — on to yours. Two rules govern that forwarding:
+
+- **The registry runs first.** Your hook is called *after* the tenant bot has
+  been started, restarted or stopped, so a hook that throws cannot keep a tenant
+  down.
+- **Your exceptions are swallowed, exactly as the registry's are.** The bridge
+  catches `Throwable` and logs a warning — this is the manager bot's update
+  worker thread, and nothing on it may escape. Do not rely on an exception from
+  your hook reaching anything; log or record what you need yourself.
+
+The bridge is itself a `ManagedBotEvents` bean, so it filters itself out of that
+forwarding list by identity — it never calls itself, and adding your own bean
+costs you nothing.
+
+Per-bot wiring still belongs in `ManagedBotCustomizer`; anything else you need at
+start time you can do inside the `TenantBotFactory`, which runs on every start.
 
 ### Single instance only
 

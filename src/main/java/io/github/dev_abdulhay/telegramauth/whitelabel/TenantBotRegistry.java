@@ -162,17 +162,17 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
      *
      * <p>Compares by identity, not equality: two distinct services are correct
      * even when they are built the same way, and only sharing is the defect.
-     * O(n) over live entries, once per bot start, with n bounded by tenant count.
+     * Neither field can be null — {@link RunningBot}'s compact constructor rejects
+     * that — so a bare {@code ==} is enough. O(n) over live entries, once per bot
+     * start, with n bounded by tenant count.
      */
     private void rejectSharedInstance(long id, RunningBot<U, S> built) {
         for (Map.Entry<Long, Slot<U, S>> e : running.entrySet()) {
             if (e.getKey() == id) continue;
             Entry<U, S> live = e.getValue().entry;
             if (live == null) continue;
-            // null-guarded: a factory may legitimately leave either field null, and
-            // two nulls are not a shared instance
-            if (sameInstance(live.bot().sessionService(), built.sessionService())
-                    || sameInstance(live.bot().module(), built.module())) {
+            if (live.bot().sessionService() == built.sessionService()
+                    || live.bot().module() == built.module()) {
                 throw new IllegalStateException("the TenantBotFactory returned the same instance for "
                         + "tenant bots " + e.getKey() + " and " + id + "; each tenant needs its own "
                         + "session service and module, so resolve them as prototype-scoped beans "
@@ -180,10 +180,6 @@ public class TenantBotRegistry<U extends BaseTelegramUser, S extends BaseAuthSes
                         + "one instance leaks tokens, auth events and rate-limit state across tenants");
             }
         }
-    }
-
-    private static boolean sameInstance(Object a, Object b) {
-        return a != null && a == b;
     }
 
     /**
