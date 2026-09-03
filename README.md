@@ -61,15 +61,24 @@ for free; override a method to change the behaviour.
 <dependency>
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.4.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
 **Gradle (Kotlin DSL):**
 
 ```kotlin
-implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.4.0")
+implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.2.0")
 ```
+
+> **This repo's `main` is ahead of the published release.** `0.2.0` is the
+> latest version on Maven Central. The features documented below — number
+> matching, contact-share and inline approve/reject, managed bots, and
+> white-label tenant bots — are not in `0.2.0` yet; they exist only on `main`.
+> To try them today, build from source (`mvn install` from the repo root) and
+> depend on the version in this repo's `pom.xml` instead of the Maven Central
+> coordinate above. [`examples/basic-auth`](examples/basic-auth) is a worked
+> example of doing exactly that.
 
 Then enable the starter:
 
