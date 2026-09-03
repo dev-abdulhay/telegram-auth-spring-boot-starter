@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        Standalone Maven project — NOT a module of the repo's root pom.xml.
+        The root pom is configured for Maven Central publishing (gpg signing,
+        javadoc/source jars); turning it into a reactor with this example would
+        risk breaking releases. This project builds and runs independently.
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.5</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>telegram-auth-basic-example</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>telegram-auth-basic-example</name>
+    <description>Minimal runnable example host for telegram-auth-spring-boot-starter (core auth flow only)</description>
+
+    <properties>
+        <java.version>17</java.version>
+    </properties>
+
+    <dependencies>
+        <!--
+            This repo's version (0.4.0) is ahead of what Maven Central actually has
+            published (0.2.0 — see the root README's install section). Depending on
+            0.4.0 here means the example is intentionally built against the LOCAL
+            source, not a stale published artifact, so it never drifts from the
+            code in this repo. Run `mvn install` from the repo root before building
+            this example (see this module's README).
+
+            Once 0.4.0 (or later) is actually released to Maven Central, point this
+            back at the published coordinate and drop the local-install requirement.
+        -->
+        <dependency>
+            <groupId>io.github.dev-abdulhay</groupId>
+            <artifactId>telegram-auth-spring-boot-starter</artifactId>
+            <version>0.4.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
