@@ -66,7 +66,7 @@
 
     <dependencyManagement>
         <dependencies>
-            <!-- Spring Boot BOM — pins every Spring/Jackson/Liquibase/Caffeine version -->
+            <!-- Spring Boot BOM — pins every Spring/Jackson version -->
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>
@@ -98,16 +98,6 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
             <scope>provided</scope>
-        </dependency>
-
-        <!-- Library deps shipped with the starter -->
-        <dependency>
-            <groupId>org.liquibase</groupId>
-            <artifactId>liquibase-core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.github.ben-manes.caffeine</groupId>
-            <artifactId>caffeine</artifactId>
         </dependency>
 
         <!--
