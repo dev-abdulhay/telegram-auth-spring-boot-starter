@@ -13,10 +13,3 @@ spring:
     hibernate:
       ddl-auto: update
     database-platform: org.hibernate.dialect.H2Dialect
-  # liquibase-core is a transitive dependency of the starter jar; without this,
-  # Spring Boot's LiquibaseAutoConfiguration looks for a changelog that does not
-  # exist here and fails context startup. The starter itself ships no changelog
-  # (host apps own their schema — see README.md), and this example uses
-  # ddl-auto: update instead.
-  liquibase:
-    enabled: false

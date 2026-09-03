@@ -45,8 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.url=jdbc:h2:mem:basic-auth-smoke;DB_CLOSE_DELAY=-1",
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.jpa.hibernate.ddl-auto=create-drop",
-        "spring.jpa.database-platform=org.hibernate.dialect.H2Dialect",
-        "spring.liquibase.enabled=false"
+        "spring.jpa.database-platform=org.hibernate.dialect.H2Dialect"
 })
 class AuthWiringSmokeTest {
 
