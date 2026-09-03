@@ -169,6 +169,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Java 17 floor is enforced by the compiler's platform API set rather than
   by whichever JDK happens to run the build.
 
+### Removed
+- **`liquibase-core` and `caffeine` are no longer dependencies of the
+  starter.** Neither was referenced anywhere in the library's own code — the
+  starter ships no Liquibase changelog and never did (hosts own their own
+  schema; see the README) — so both were dead weight on every consumer's
+  classpath. Their only real effect was a footgun: because JPA is mandatory
+  for this starter, every host has a `DataSource`, which made Spring Boot's
+  `LiquibaseAutoConfiguration` activate automatically and then fail startup
+  looking for a changelog that does not exist, **unless the host explicitly
+  set `spring.liquibase.enabled=false`.** That requirement was never
+  documented. Hosts that were setting it may now remove it; hosts that were
+  not need do nothing differently, since removing the dependency removes the
+  failure along with it.
+
 ### Fixed
 - **Re-authorising a bot right after decommissioning it is no longer swallowed.**
   `decommission` registered a *blanket* echo guard, suppressing every

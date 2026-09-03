@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 // so neither route would register the prototype bean.
 @SpringBootTest(classes = {DemoApp.class, TenantServiceTransactionTest.ProtoConfig.class},
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
-        properties = {"telegram.auth.enabled=true", "spring.liquibase.enabled=false"})
+        properties = {"telegram.auth.enabled=true"})
 class TenantServiceTransactionTest {
 
     /**
