@@ -12,6 +12,24 @@ The flow: a web/mobile client opens a login session, the user confirms in your
 Telegram bot, and the backend returns a project-defined payload (JWT, session
 cookie — whatever you decide).
 
+## What's in it
+
+Three independent layers, each with its own switch. The auth flow stands alone;
+managed bots need it; white-label needs both.
+
+| Feature | What it does | Turned on by |
+| --- | --- | --- |
+| [Bot login flow](#build-a-module) | `/start <token>` deep link: the client opens a session, the user confirms in your bot, your backend returns whatever payload it decides | `telegram.auth.enabled=true` |
+| [REST endpoints](#rest-api-per-module) | Create a session, long-poll for the outcome, read status, cancel — one set per user type | comes with the flow |
+| [Contact share and approve/reject](#build-a-module) | Ask for the user's phone via contact-share (`/skip` allowed), and an inline ✅/❌ confirmation showing the session's IP and device | `Options.requireContact` / `requireApproval`, both off by default |
+| [Number matching](#number-matching-codeconfirmation) | The browser shows a two-digit code the user must pick in the bot, so tapping a link is no longer enough to complete a login | on by default (`codeConfirmation=BUTTON`) |
+| [Multiple user types](#multiple-user-types) | N independent bots, tables and REST prefixes from one dependency | declare one module per type |
+| [Managed bots](#managed-bots) | Your bot creates bots on your users' behalf and keeps custody of their tokens, encrypted — with rotation, access settings and decommission | `telegram.managed-bots.enabled=true` |
+| [White-label tenant bots](#white-label-tenant-bots) | Every managed bot gets its own polling runtime and session service, so each tenant authenticates through its own branded bot | `telegram.white-label.enabled=true` |
+
+Every property is listed in the [configuration reference](#configuration-reference).
+[Status & roadmap](#status--roadmap) says what is *not* built yet.
+
 ## Mental model
 
 The starter ships **only generic, abstract building blocks** — it creates **no
