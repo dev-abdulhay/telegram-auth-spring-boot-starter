@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-09-03
+
+This release folds three previously separate efforts into 0.4.0: **managed
+bots**, an opt-in feature that lets a manager bot create tenant bots and hold
+custody of their tokens; the **white-label tenant runtime** built on top of
+managed bots, giving each tenant its own branded bot end to end; and the
+**login-confirmation hardening** that moves a login from "someone tapped a
+link" to "someone is looking at the browser that started this login". It also
+drops the unused `liquibase-core` and `caffeine` dependencies, and fixes a
+string of issues found while stabilizing managed bots and white-label after
+they landed.
 
 ### Added
 - **Managed bots** (`io.github.dev_abdulhay.telegramauth.managedbots`), a
@@ -133,6 +143,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outage cannot kill a healthy bot. A poll failure is **not** proof of a
   revoked token: an unparseable payload and a `409` from a competing poller
   reach the same path.
+- **Number matching** (`DefaultAuthFlow.Options.codeConfirmation`, default
+  `BUTTON`): the browser shows a 2-digit code and the bot asks for it, either as
+  an inline keyboard of candidates (`BUTTON`) or as typed text (`TYPED`); `OFF`
+  restores the 0.3.x behaviour. A wrong answer never invites a retry — `BUTTON`
+  ends the login on the first miss, `TYPED` allows three of a hundred
+  candidates — and every wrong answer is logged at `WARN`.
+- New non-terminal session status `AWAITING_CODE`, with
+  `AbstractSessionService.awaitCode(tokenHash)` performing the
+  `PENDING → AWAITING_CODE` transition. It does **not** call the host
+  `approveHandler`, which stays reserved for the final approval.
+- **Per-user cooldown** after a login dies at the code step
+  (`codeCooldown` 5 min, doubling up to `codeCooldownMax` 1 h once
+  `codeCooldownThreshold` — default 1 — failed logins accumulate; a successful
+  login clears the ladder). Rejecting the session alone is no obstacle: the
+  attacker simply opens another one. All attempts of a single `TYPED` login
+  count as one strike; ❌ is never blocked by a cooldown.
+- `ConfirmCodeGenerator` + default `ConfirmCode` (first two bytes of the token
+  hash, modulo 100), pluggable via `TelegramBotModule.Builder#confirmCodeGenerator`.
+  The code is derived, never stored — no new column, no migration.
+- `TelegramBotModule#onText(Consumer<JsonNode>)`, a single-slot handler for text
+  updates that matched no command. `BotUpdateDispatcher` routing order is now
+  `callback_query` → commands → `contact` → `text` → `fallback`; an
+  unregistered `/command` reaches the text handler, and `DefaultAuthFlow`
+  forwards everything it does not own to the module fallback.
+- `GET /session/{token}/poll?since=` — `since=PENDING` opts into the code step
+  and answers `202 { status:"AWAITING_CODE", confirmCode }`;
+  `since=AWAITING_CODE` waits for a terminal state, which is what stops a client
+  from busy-looping on the state it is already in. Omitting `since` keeps the
+  0.3.x terminal-only contract, answering a mid-poll code transition with `204`.
+- Flow options are bindable from `telegram.auth.flow.*`, with optional per-type
+  overrides under `telegram.auth.flows.<name>.*` falling back to `flow` and then
+  to the built-in defaults. The starter auto-configures a
+  `DefaultAuthFlow.Options` bean; declaring your own replaces it.
+- `Options.codeButtons` (3–10, default 3), `maxCodeAttempts` (0 = per-mode
+  default), `effectiveMaxCodeAttempts()`, and overridable
+  `DefaultAuthFlow#codeChoices(int, int)` / `#formatCode(int)` /
+  `#sessionDetails(S, String)`.
+- `FlowMessages` keys `CONFIRM_WARNING`, `CONFIRM_STEP_DONE`,
+  `CODE_PROMPT_BUTTON`, `CODE_PROMPT_TYPED`, `CODE_WRONG`, `CODE_NOT_A_NUMBER`,
+  `CODE_ATTEMPTS_EXHAUSTED`, `TOO_MANY_ATTEMPTS` — all in uz/ru/en. Every
+  confirmation question now ends with a warning that nobody should ever ask the
+  user to tap ✅.
 
 ### Changed
 - Sessions created through a module that carries a `botUserId` are now
@@ -168,6 +220,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The build now sets `maven.compiler.release=17` alongside source/target, so
   the Java 17 floor is enforced by the compiler's platform API set rather than
   by whichever JDK happens to run the build.
+- **Registration moved to the last confirmation.** The user row was created when
+  ✅ was pressed; with a code step configured, ✅ only unlocks the number
+  question, so a login phished or abandoned at the code step no longer leaves an
+  `ACTIVE` account behind.
+- `AWAITING_CODE` sessions hold their per-IP rate-limit slot and are swept to
+  `EXPIRED` alongside `PENDING`. Counting only `PENDING` would have let an
+  attacker park sessions at the code step to bypass `maxPendingPerIp`, and
+  sweeping only `PENDING` would have left half-finished logins alive forever.
+  `TERMINAL_STATUSES` is deliberately unchanged — it drives the retention purge,
+  which must never delete a live session.
+- `AuthEventBus` no longer promises "terminal events only": dispatch still
+  removes the listener, so one subscription observes exactly one event, but
+  `AWAITING_CODE` is non-terminal and the client re-subscribes on its next poll.
+  `InMemoryAuthEventBus` behaviour is unchanged.
+- `DELETE /session/{token}` now also cancels a session sitting at
+  `AWAITING_CODE`.
+- `sessionTtl` default `3m` → `5m`; the contact and code steps share that window.
 
 ### Removed
 - **`liquibase-core` and `caffeine` are no longer dependencies of the
@@ -269,76 +338,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `JpaManagedBotTokenStore`'s `Supplier<M> factory` contract is documented: it
   must return a blank, unsaved entity, because `save` uses
   `getBotUserId() == null` as its is-new test.
-
-## [0.4.0] - 2026-08-17
-
-Login confirmation moves from "someone tapped a link" to "someone is looking at
-the browser that started this login".
-
-### Added
-- **Number matching** (`DefaultAuthFlow.Options.codeConfirmation`, default
-  `BUTTON`): the browser shows a 2-digit code and the bot asks for it, either as
-  an inline keyboard of candidates (`BUTTON`) or as typed text (`TYPED`); `OFF`
-  restores the 0.3.x behaviour. A wrong answer never invites a retry — `BUTTON`
-  ends the login on the first miss, `TYPED` allows three of a hundred
-  candidates — and every wrong answer is logged at `WARN`.
-- New non-terminal session status `AWAITING_CODE`, with
-  `AbstractSessionService.awaitCode(tokenHash)` performing the
-  `PENDING → AWAITING_CODE` transition. It does **not** call the host
-  `approveHandler`, which stays reserved for the final approval.
-- **Per-user cooldown** after a login dies at the code step
-  (`codeCooldown` 5 min, doubling up to `codeCooldownMax` 1 h once
-  `codeCooldownThreshold` — default 1 — failed logins accumulate; a successful
-  login clears the ladder). Rejecting the session alone is no obstacle: the
-  attacker simply opens another one. All attempts of a single `TYPED` login
-  count as one strike; ❌ is never blocked by a cooldown.
-- `ConfirmCodeGenerator` + default `ConfirmCode` (first two bytes of the token
-  hash, modulo 100), pluggable via `TelegramBotModule.Builder#confirmCodeGenerator`.
-  The code is derived, never stored — no new column, no migration.
-- `TelegramBotModule#onText(Consumer<JsonNode>)`, a single-slot handler for text
-  updates that matched no command. `BotUpdateDispatcher` routing order is now
-  `callback_query` → commands → `contact` → `text` → `fallback`; an
-  unregistered `/command` reaches the text handler, and `DefaultAuthFlow`
-  forwards everything it does not own to the module fallback.
-- `GET /session/{token}/poll?since=` — `since=PENDING` opts into the code step
-  and answers `202 { status:"AWAITING_CODE", confirmCode }`;
-  `since=AWAITING_CODE` waits for a terminal state, which is what stops a client
-  from busy-looping on the state it is already in. Omitting `since` keeps the
-  0.3.x terminal-only contract, answering a mid-poll code transition with `204`.
-- Flow options are bindable from `telegram.auth.flow.*`, with optional per-type
-  overrides under `telegram.auth.flows.<name>.*` falling back to `flow` and then
-  to the built-in defaults. The starter auto-configures a
-  `DefaultAuthFlow.Options` bean; declaring your own replaces it.
-- `Options.codeButtons` (3–10, default 3), `maxCodeAttempts` (0 = per-mode
-  default), `effectiveMaxCodeAttempts()`, and overridable
-  `DefaultAuthFlow#codeChoices(int, int)` / `#formatCode(int)` /
-  `#sessionDetails(S, String)`.
-- `FlowMessages` keys `CONFIRM_WARNING`, `CONFIRM_STEP_DONE`,
-  `CODE_PROMPT_BUTTON`, `CODE_PROMPT_TYPED`, `CODE_WRONG`, `CODE_NOT_A_NUMBER`,
-  `CODE_ATTEMPTS_EXHAUSTED`, `TOO_MANY_ATTEMPTS` — all in uz/ru/en. Every
-  confirmation question now ends with a warning that nobody should ever ask the
-  user to tap ✅.
-
-### Changed
-- **Registration moved to the last confirmation.** The user row was created when
-  ✅ was pressed; with a code step configured, ✅ only unlocks the number
-  question, so a login phished or abandoned at the code step no longer leaves an
-  `ACTIVE` account behind.
-- `AWAITING_CODE` sessions hold their per-IP rate-limit slot and are swept to
-  `EXPIRED` alongside `PENDING`. Counting only `PENDING` would have let an
-  attacker park sessions at the code step to bypass `maxPendingPerIp`, and
-  sweeping only `PENDING` would have left half-finished logins alive forever.
-  `TERMINAL_STATUSES` is deliberately unchanged — it drives the retention purge,
-  which must never delete a live session.
-- `AuthEventBus` no longer promises "terminal events only": dispatch still
-  removes the listener, so one subscription observes exactly one event, but
-  `AWAITING_CODE` is non-terminal and the client re-subscribes on its next poll.
-  `InMemoryAuthEventBus` behaviour is unchanged.
-- `DELETE /session/{token}` now also cancels a session sitting at
-  `AWAITING_CODE`.
-- `sessionTtl` default `3m` → `5m`; the contact and code steps share that window.
-
-### Fixed
 - The confirmation-code guess re-checks the user's `BLOCKED` status. The entry
   checks run before the code question is asked — and the `TYPED` text path had
   no entry check at all — so a user blocked *mid-flow* (while the code question
