@@ -1,0 +1,22 @@
+telegram:
+  auth:
+    enabled: true
+  bot:
+    token: ${TELEGRAM_BOT_TOKEN}
+    username: ${TELEGRAM_BOT_USERNAME}
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:basic-auth;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    database-platform: org.hibernate.dialect.H2Dialect
+  # liquibase-core is a transitive dependency of the starter jar; without this,
+  # Spring Boot's LiquibaseAutoConfiguration looks for a changelog that does not
+  # exist here and fails context startup. The starter itself ships no changelog
+  # (host apps own their schema — see README.md), and this example uses
+  # ddl-auto: update instead.
+  liquibase:
+    enabled: false
