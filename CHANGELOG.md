@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-09-03
+## [0.4.0] - 2026-09-10
 
 This release folds three previously separate efforts into 0.4.0: **managed
 bots**, an opt-in feature that lets a manager bot create tenant bots and hold
@@ -343,6 +343,15 @@ they landed.
   no entry check at all — so a user blocked *mid-flow* (while the code question
   was on screen) could still complete the login. `handleGuess` now answers
   `ACCESS_DENIED` for a blocked user in both `BUTTON` and `TYPED` modes.
+
+### Documentation
+- The README install snippets now name `0.4.0`, and the note warning that
+  `main` was ahead of the latest published release is gone: 0.4.0 is on Maven
+  Central, so the documented features are the released ones.
+- `examples/basic-auth` no longer requires a local `mvn install` first — it
+  resolves the starter from Maven Central like any other host would. Installing
+  locally is now only needed when testing the example against uncommitted
+  library changes.
 
 ### Breaking
 - `codeConfirmation` defaults to `BUTTON`, so `Options.defaults()` and the
