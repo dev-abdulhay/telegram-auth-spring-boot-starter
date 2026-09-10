@@ -12,30 +12,23 @@ all deliberately left out (see [What this example leaves out](#what-this-example
 - A Telegram bot: message [@BotFather](https://t.me/BotFather), `/newbot`, and
   keep the token it gives you and the bot's `@username` (without the `@`).
 
-## Before you start: build the library locally
+## The library dependency
 
-This example depends on `io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.4.0`.
-That version is **not published on Maven Central yet** — this repo's `main` is
-ahead of the latest actual release (`0.2.0`; see the
-[root README's install section](../../README.md#install)). So this example is
-built against your **local** copy of the library on purpose: that is what
-keeps it from ever drifting out of sync with the code actually in this repo,
-instead of silently depending on a stale published jar.
+This example depends on `io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.4.0`,
+which resolves straight from Maven Central — no extra setup needed. The version
+is pinned to the one this repo's `pom.xml` declares, so the example stays in
+step with the code here.
 
-Before building or running this example, install the library into your local
-Maven repository:
+If you are changing the library and want the example to pick those changes up,
+install your local copy first:
 
 ```bash
 # from the repo root
 mvn install -DskipTests
 ```
 
-This also builds the library's javadoc and source jars, so the first run is
-slower than a plain `compile` — that is expected.
-
-Once a release ships that includes the core auth flow used here, this
-example's `pom.xml` can point at the published coordinate instead — see the
-comment on the dependency there.
+That also builds the javadoc and source jars, so it is slower than a plain
+`compile` — that is expected.
 
 ## How to run
 
