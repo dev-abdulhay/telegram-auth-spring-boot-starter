@@ -489,6 +489,72 @@ public class ManagedBotService {
     }
 
     /**
+     * The creator's bots that no intent claims, for the screen where a human says
+     * which bot was meant for what. Unfiltered by age on purpose: a bot created
+     * before intents existed is exactly the case this screen has to repair.
+     *
+     * @return empty when the intent is unknown or not {@code CLAIMED}
+     */
+    public List<ManagedBot> findUnassignedBots(String intentId) {
+        ManagedBotIntent intent = findIntent(intentId).orElse(null);
+        if (intent == null || intent.status() != ManagedBotIntentStatus.CLAIMED) return List.of();
+        return unassignedBotsFor(intent, false);
+    }
+
+    /**
+     * Links a bot to an intent by hand, after {@code onIntentUnmatched} or
+     * {@code onIntentAmbiguous} sent the decision to a human.
+     *
+     * @throws ManagedBotIntentException with the reason that applies; a concurrent
+     *         assignment surfaces as {@code BOT_ALREADY_ASSIGNED} through the unique
+     *         {@code bot_user_id} constraint
+     */
+    public ManagedBotIntent assignToIntent(String intentId, long botUserId) {
+        ManagedBotIntentStore intents = requireIntentStore();
+        ManagedBotIntent intent = findIntent(intentId).orElseThrow(() -> new ManagedBotIntentException(
+                ManagedBotIntentException.Reason.INTENT_NOT_FOUND, "unknown intent " + intentId));
+        if (intent.status() != ManagedBotIntentStatus.CLAIMED) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.INTENT_NOT_CLAIMED,
+                    "intent " + intentId + " is " + intent.status());
+        }
+        ManagedBot bot = store.findByBotUserId(botUserId).orElseThrow(() -> new ManagedBotIntentException(
+                ManagedBotIntentException.Reason.BOT_NOT_FOUND, "unknown managed bot " + botUserId));
+        if (intent.ownerUserId() == null || bot.ownerUserId() != intent.ownerUserId()) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.OWNER_MISMATCH,
+                    "managed bot " + botUserId + " was not created by the intent's owner");
+        }
+        if (intents.findByBotUserId(botUserId).isPresent()) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED,
+                    "managed bot " + botUserId + " is already assigned to an intent");
+        }
+        ManagedBotIntent done = intent.completedWith(botUserId, OffsetDateTime.now());
+        try {
+            intents.save(done);
+        } catch (RuntimeException e) {
+            // The unique bot_user_id index is the real arbiter when two assignments race.
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED,
+                    "managed bot " + botUserId + " was assigned concurrently", e);
+        }
+        publish("onIntentMatched", () -> events.onIntentMatched(bot, done));
+        return done;
+    }
+
+    /**
+     * Removes a bot the user does not want from the resolution screen: same revoke
+     * and forget as {@link #decommission(long)}, but it refuses a bot some intent
+     * already claims, so a misclick cannot disconnect a live tenant.
+     *
+     * <p>The bot keeps existing on Telegram; only its owner can delete it, in BotFather.
+     */
+    public void decommissionUnassigned(long botUserId) {
+        if (intentStore != null && intentStore.findByBotUserId(botUserId).isPresent()) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED,
+                    "managed bot " + botUserId + " is assigned to an intent");
+        }
+        decommission(botUserId);
+    }
+
+    /**
      * The creator's bots that no intent claims.
      *
      * @param sinceIntent {@code true} drops bots older than the intent — right for

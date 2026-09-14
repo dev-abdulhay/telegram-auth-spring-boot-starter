@@ -62,6 +62,7 @@ class ManagedBotIntentServiceTest {
         TelegramBot fake = new TelegramBot(HttpClient.newHttpClient(), "123:ABC") {
             @Override public String getManagedBotToken(long botUserId) { return "999:CHILD"; }
             @Override public void sendMessage(long chatId, String text, String replyMarkupJson) { }
+            @Override public String replaceManagedBotToken(long botUserId) { return "999:ROTATED"; }
         };
         TelegramBotModule module = TelegramBotModule.builder("123:ABC", "manager_bot").bot(fake).build();
         InMemoryManagedBotStore bots = new InMemoryManagedBotStore();
@@ -387,5 +388,110 @@ class ManagedBotIntentServiceTest {
 
         assertThat(r.intent().status()).isEqualTo(ManagedBotIntentStatus.CLAIMED);
         assertThat(e.events().events).containsExactly("claimed:" + id);
+    }
+
+    @Test
+    void aCompletedIntentIsAlreadyDoneForItsOwnerAndNotTheirsForAnyoneElse() {
+        Env e = env();
+        OffsetDateTime now = OffsetDateTime.now();
+        e.bots().save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+        String id = claimedIntent(e, 7L, null);
+        e.service().assignToIntent(id, 555L);
+
+        assertThat(e.service().claimIntent(id, 7L).outcome()).isEqualTo(IntentClaim.COMPLETED);
+        assertThat(e.service().claimIntent(id, 8L).outcome()).isEqualTo(IntentClaim.OTHER_OWNER);
+    }
+
+    @Test
+    void theResolutionScreenListsEveryUnassignedBotOfTheOwnerIncludingOldOnes() {
+        Env e = env();
+        OffsetDateTime longAgo = OffsetDateTime.now().minusDays(3);
+        OffsetDateTime now = OffsetDateTime.now();
+        e.bots().save(new ManagedBot(555L, "old_bot", "Old", 7L, "ENC(x)", longAgo, longAgo));
+        e.bots().save(new ManagedBot(556L, "new_bot", "New", 7L, "ENC(x)", now, now));
+        e.bots().save(new ManagedBot(557L, "other_owner_bot", "Other", 8L, "ENC(x)", now, now));
+        String id = claimedIntent(e, 7L, null);
+        e.intents().save(e.intents().findById(id).orElseThrow());   // still CLAIMED
+
+        assertThat(e.service().findUnassignedBots(id))
+                .extracting(ManagedBot::botUserId).containsExactlyInAnyOrder(555L, 556L);
+    }
+
+    @Test
+    void anAssignedBotDropsOutOfTheListAndANonClaimedIntentListsNothing() {
+        Env e = env();
+        OffsetDateTime now = OffsetDateTime.now();
+        e.bots().save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+        String taken = claimedIntent(e, 7L, null);
+        e.service().assignToIntent(taken, 555L);
+
+        String fresh = claimedIntent(e, 7L, null);
+        assertThat(e.service().findUnassignedBots(fresh)).isEmpty();
+
+        String open = e.service().createIntent(null, null, null).intentId();
+        assertThat(e.service().findUnassignedBots(open)).isEmpty();
+    }
+
+    @Test
+    void assignCompletesTheIntentAndAnnouncesTheMatch() {
+        Env e = env();
+        OffsetDateTime now = OffsetDateTime.now();
+        e.bots().save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+        String id = claimedIntent(e, 7L, null);
+
+        ManagedBotIntent done = e.service().assignToIntent(id, 555L);
+
+        assertThat(done.status()).isEqualTo(ManagedBotIntentStatus.COMPLETED);
+        assertThat(done.botUserId()).isEqualTo(555L);
+        assertThat(e.events().events).contains("matched:555:" + id);
+    }
+
+    @Test
+    void assignRefusesEveryWayItCan() {
+        Env e = env();
+        OffsetDateTime now = OffsetDateTime.now();
+        e.bots().save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+        e.bots().save(new ManagedBot(557L, "other_bot", "Other", 8L, "ENC(x)", now, now));
+        String claimed = claimedIntent(e, 7L, null);
+        String open = e.service().createIntent(null, null, null).intentId();
+
+        assertReason(() -> e.service().assignToIntent("nope", 555L),
+                ManagedBotIntentException.Reason.INTENT_NOT_FOUND);
+        assertReason(() -> e.service().assignToIntent(open, 555L),
+                ManagedBotIntentException.Reason.INTENT_NOT_CLAIMED);
+        assertReason(() -> e.service().assignToIntent(claimed, 999L),
+                ManagedBotIntentException.Reason.BOT_NOT_FOUND);
+        assertReason(() -> e.service().assignToIntent(claimed, 557L),
+                ManagedBotIntentException.Reason.OWNER_MISMATCH);
+
+        e.service().assignToIntent(claimed, 555L);
+        String second = claimedIntent(e, 7L, null);
+        assertReason(() -> e.service().assignToIntent(second, 555L),
+                ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED);
+    }
+
+    @Test
+    void decommissionUnassignedRefusesABotThatIsAlreadyLinked() {
+        Env e = env();
+        OffsetDateTime now = OffsetDateTime.now();
+        e.bots().save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+        e.bots().save(new ManagedBot(556L, "two_bot", "Two", 7L, "ENC(x)", now, now));
+        String id = claimedIntent(e, 7L, null);
+        e.service().assignToIntent(id, 555L);
+
+        assertReason(() -> e.service().decommissionUnassigned(555L),
+                ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED);
+        assertThat(e.bots().findByBotUserId(555L)).isPresent();
+
+        e.service().decommissionUnassigned(556L);
+        assertThat(e.bots().findByBotUserId(556L)).isEmpty();
+    }
+
+    private static void assertReason(org.assertj.core.api.ThrowableAssert.ThrowingCallable call,
+                                     ManagedBotIntentException.Reason expected) {
+        assertThatThrownBy(call)
+                .isInstanceOf(ManagedBotIntentException.class)
+                .extracting(t -> ((ManagedBotIntentException) t).reason())
+                .isEqualTo(expected);
     }
 }
