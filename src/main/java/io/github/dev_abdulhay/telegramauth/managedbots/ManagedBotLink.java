@@ -32,7 +32,15 @@ public final class ManagedBotLink {
         return link.toString();
     }
 
-    private static String validateUsername(String username) {
+    /**
+     * Rejects what Telegram could never accept: 5-32 characters of {@code [A-Za-z0-9_]}
+     * ending in {@code bot}. Whether the name is still <em>free</em> is unknowable from
+     * the Bot API. Public so intent creation can fail fast on the host's thread instead
+     * of on a bot update worker.
+     *
+     * @return the username unchanged, for chaining
+     */
+    public static String validateUsername(String username) {
         if (username.length() < 5 || username.length() > 32) {
             throw new IllegalArgumentException(
                     "a bot username must be 5-32 characters but was " + username.length());
