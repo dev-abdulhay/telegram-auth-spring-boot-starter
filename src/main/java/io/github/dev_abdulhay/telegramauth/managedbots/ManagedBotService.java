@@ -241,7 +241,7 @@ public class ManagedBotService {
         String fresh = module.getBot().replaceManagedBotToken(botUserId);
         ManagedBot saved = persist(existing.botUserId(), existing.username(), existing.firstName(),
                 existing.ownerUserId(), fresh, existing.createdAt());
-        events.onTokenRotated(saved);
+        publish("onTokenRotated", () -> events.onTokenRotated(saved));
         return fresh;
     }
 
@@ -299,7 +299,7 @@ public class ManagedBotService {
             selfInitiated.remove(botUserId);
         }
         store.deleteByBotUserId(botUserId);
-        events.onDecommissioned(botUserId);
+        publish("onDecommissioned", () -> events.onDecommissioned(botUserId));
     }
 
     /**
@@ -388,11 +388,71 @@ public class ManagedBotService {
                 ownerUserId, rawToken,
                 known.map(ManagedBot::createdAt).orElse(null));
         if (known.isEmpty()) {
-            events.onCreated(saved);
+            // Matching first: it only writes rows. Publishing comes after, so a listener
+            // that throws cannot leave an intent half-linked or swallow the intent event.
+            Runnable intentEvent = matchOnCreation(saved);
+            publish("onCreated", () -> events.onCreated(saved));
+            if (intentEvent != null) intentEvent.run();
         } else {
-            events.onTokenRotated(saved);
+            publish("onTokenRotated", () -> events.onTokenRotated(saved));
         }
         return saved;
+    }
+
+    /**
+     * Links this freshly created bot to one of its creator's waiting intents.
+     *
+     * @return the event to publish once {@code onCreated} has run, or {@code null}
+     *         when there was nothing to decide
+     */
+    private Runnable matchOnCreation(ManagedBot bot) {
+        if (intentStore == null) return null;
+        if (intentStore.findByBotUserId(bot.botUserId()).isPresent()) return null;
+        List<ManagedBotIntent> candidates = candidatesFor(bot);
+        if (candidates.isEmpty()) return null;
+        ManagedBotIntent chosen = pickIntent(candidates, bot.username());
+        if (chosen == null) {
+            return () -> publish("onIntentUnmatched", () -> events.onIntentUnmatched(bot, candidates));
+        }
+        ManagedBotIntent done = chosen.completedWith(bot.botUserId(), OffsetDateTime.now());
+        intentStore.save(done);
+        return () -> publish("onIntentMatched", () -> events.onIntentMatched(bot, done));
+    }
+
+    /**
+     * An intent cannot predate the bot it asked for, so anything created before the
+     * intent existed belongs to some other purpose and is never auto-matched. The
+     * manual resolution screen still lists it — see {@link #findUnassignedBots}.
+     */
+    private List<ManagedBotIntent> candidatesFor(ManagedBot bot) {
+        return intentStore.findClaimedByOwner(bot.ownerUserId()).stream()
+                .filter(i -> !bot.createdAt().isBefore(i.createdAt()))
+                .toList();
+    }
+
+    /** @return the single sensible candidate, or {@code null} when a human has to choose */
+    private static ManagedBotIntent pickIntent(List<ManagedBotIntent> candidates, String username) {
+        if (username != null) {
+            List<ManagedBotIntent> byUsername = candidates.stream()
+                    .filter(i -> i.suggestedUsername() != null
+                            && i.suggestedUsername().equalsIgnoreCase(username))
+                    .toList();
+            if (byUsername.size() == 1) return byUsername.get(0);
+        }
+        return candidates.size() == 1 ? candidates.get(0) : null;
+    }
+
+    /**
+     * Runs a host callback without letting it derail the rest. The white-label bridge
+     * guards every callback already; this brings the direct path in line, which is what
+     * makes "matching state is persisted, then events are published" a promise.
+     */
+    private void publish(String event, Runnable body) {
+        try {
+            body.run();
+        } catch (Throwable t) {
+            log.warn("managed-bot listener failed on {}", event, t);
+        }
     }
 
     /**
