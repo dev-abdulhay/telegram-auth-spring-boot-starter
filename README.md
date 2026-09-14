@@ -1014,9 +1014,14 @@ intent store simply does not know the id, `claimIntent` returns `UNKNOWN`, the
 flow returns `false`, and the login proceeds exactly as it always has.
 
 The same design removes a registration-order hazard: `DefaultAuthFlow` is not
-modified and does not have to be constructed first, and if a module registers no
-`/start` handler at all, an unclaimed payload just goes nowhere with a debug log,
-as before.
+modified and does not have to be constructed first. If a module registers no
+`/start` handler at all, an unclaimed payload is silently dropped — the update is
+still consumed, but `BotUpdateDispatcher`'s composed handler simply does nothing
+when the command handler is `null`; there is no log line. That is also a routing
+change from 0.4.0, not "as before": a `/start <payload>` with no `/start` command
+registered used to fall through to the **text** handler, whereas a matched
+start-payload route now consumes the update at the dispatcher and returns, so the
+text handler is never reached for it.
 
 What the user sees for each outcome:
 
@@ -1053,7 +1058,10 @@ managedBotService.decommissionUnassigned(botUserId);
   the token only in its encrypted form, masked in `toString` as everywhere else —
   do not put it on the screen.
 - `assignToIntent` links the bot by hand and runs the normal `onIntentMatched`
-  path, returning the saved intent.
+  path, returning the saved intent. Call it outside your own `@Transactional`
+  method when you can: the store flushes immediately so the unique `bot_user_id`
+  index can arbitrate a concurrent assignment, and that flush failure would
+  otherwise poison the caller's own transaction.
 - `decommissionUnassigned` is `decommission` with a guard: it refuses a bot that
   some intent already claims, so a misclick cannot disconnect a live tenant.
   Everything else about it is `decommission` — the token is revoked, the row is
