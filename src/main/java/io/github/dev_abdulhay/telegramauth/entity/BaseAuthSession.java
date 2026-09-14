@@ -73,6 +73,17 @@ public abstract class BaseAuthSession {
     @Column(name = "user_agent", length = 500)
     private String userAgent;
 
+    /**
+     * Opaque host correlation key, set by host code at session creation and handed
+     * back in {@code AuthContext} on approval — "this session is admin 7 linking
+     * their Telegram", not just "someone is logging in".
+     *
+     * <p>Never accepted from the client: it names <em>whose</em> account the approval
+     * may touch.
+     */
+    @Column(name = "host_ref", length = 128)
+    private String hostRef;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt = OffsetDateTime.now();
 
@@ -111,6 +122,8 @@ public abstract class BaseAuthSession {
     public void setIpAddress(String ipAddress) { this.ipAddress = ipAddress; }
     public String getUserAgent() { return userAgent; }
     public void setUserAgent(String userAgent) { this.userAgent = userAgent; }
+    public String getHostRef() { return hostRef; }
+    public void setHostRef(String hostRef) { this.hostRef = hostRef; }
     public OffsetDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(OffsetDateTime createdAt) { this.createdAt = createdAt; }
     public OffsetDateTime getExpiresAt() { return expiresAt; }

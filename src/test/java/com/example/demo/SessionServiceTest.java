@@ -1,5 +1,7 @@
 package com.example.demo;
 
+import io.github.dev_abdulhay.telegramauth.api.dto.AuthApproveResult;
+import io.github.dev_abdulhay.telegramauth.api.dto.AuthContext;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBot;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession;
@@ -13,6 +15,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SessionServiceTest {
 
@@ -101,5 +104,68 @@ class SessionServiceTest {
         svc.awaitCode(hashB);
         assertThat(svc.reject(hashB)).isTrue();
         assertThat(((BaseAuthSession) b.entity()).getStatus()).isEqualTo(BaseAuthSession.Status.REJECTED);
+    }
+
+    @Test
+    void aSessionCarriesTheHostRefIntoTheApproveHandler() {
+        AtomicReference<String> seen = new AtomicReference<>();
+        TelegramBotModule module = TelegramBotModule.builder("123:ABC", "demo_bot")
+                .bot(new TelegramBot(HttpClient.newHttpClient(), "x") {
+                    @Override public void sendMessage(long chatId, String text) { }
+                })
+                .approveHandler((info, ctx) -> {
+                    seen.set(ctx.getHostRef());
+                    return new AuthApproveResult(Map.of());
+                })
+                .build();
+        DemoSessionService svc = new DemoSessionService(new StubSessionRepo(), new TokenGenerator(), module);
+        var created = svc.create("1.2.3.4", "JUnit", "link:admin:7");
+
+        DemoUser u = new DemoUser();
+        u.setTelegramId(99L);
+        svc.approve(svc.hash(created.rawToken()), u);
+
+        assertThat(created.entity().getHostRef()).isEqualTo("link:admin:7");
+        assertThat(seen.get()).isEqualTo("link:admin:7");
+    }
+
+    @Test
+    void anOrdinaryLoginHasNoHostRef() {
+        AtomicReference<String> seen = new AtomicReference<>("unset");
+        TelegramBotModule module = TelegramBotModule.builder("123:ABC", "demo_bot")
+                .bot(new TelegramBot(HttpClient.newHttpClient(), "x") {
+                    @Override public void sendMessage(long chatId, String text) { }
+                })
+                .approveHandler((info, ctx) -> {
+                    seen.set(ctx.getHostRef());
+                    return new AuthApproveResult(Map.of());
+                })
+                .build();
+        DemoSessionService svc = new DemoSessionService(new StubSessionRepo(), new TokenGenerator(), module);
+        var created = svc.create("1.2.3.4", "JUnit");
+
+        assertThat(created.entity().getHostRef()).isNull();
+
+        DemoUser u = new DemoUser();
+        u.setTelegramId(99L);
+        svc.approve(svc.hash(created.rawToken()), u);
+
+        assertThat(seen.get()).isNull();
+    }
+
+    @Test
+    void anOversizedHostRefIsRejectedBeforeItReachesTheDatabase() {
+        DemoSessionService svc = new DemoSessionService(new StubSessionRepo(), new TokenGenerator(), module());
+
+        assertThatThrownBy(() -> svc.create("1.2.3.4", "JUnit", "x".repeat(129)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void theTwoArgumentAuthContextStillWorks() {
+        AuthContext ctx = new AuthContext("1.2.3.4", "JUnit");
+
+        assertThat(ctx.getHostRef()).isNull();
+        assertThat(ctx.getIpAddress()).isEqualTo("1.2.3.4");
     }
 }
