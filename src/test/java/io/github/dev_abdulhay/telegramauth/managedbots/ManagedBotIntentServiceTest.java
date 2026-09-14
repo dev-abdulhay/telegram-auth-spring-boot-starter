@@ -26,6 +26,24 @@ class ManagedBotIntentServiceTest {
         }
     }
 
+    /**
+     * Throws from {@code save} while armed, so {@code assignToIntent}'s failure-translation
+     * branch is reachable. {@code onFailingSave} lets a test simulate a concurrent winner's
+     * write landing at the exact moment ours fails — the race the branch is meant to detect.
+     */
+    static class FailingIntentStore extends InMemoryManagedBotIntentStore {
+        boolean failing;
+        Runnable onFailingSave;
+        @Override public void save(ManagedBotIntent intent) {
+            if (failing) {
+                failing = false;
+                if (onFailingSave != null) onFailingSave.run();
+                throw new IllegalStateException("store unavailable");
+            }
+            super.save(intent);
+        }
+    }
+
     static class RecordingEvents implements ManagedBotEvents {
         final List<String> events = new ArrayList<>();
         @Override public void onIntentClaimed(ManagedBotIntent intent) { events.add("claimed:" + intent.id()); }
@@ -468,6 +486,57 @@ class ManagedBotIntentServiceTest {
         String second = claimedIntent(e, 7L, null);
         assertReason(() -> e.service().assignToIntent(second, 555L),
                 ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED);
+    }
+
+    /** Builds a service over a caller-supplied intent store, the way {@code env()} does for the default one. */
+    private static ManagedBotService serviceOver(InMemoryManagedBotStore bots, ManagedBotIntentStore intents,
+                                                 ManagedBotEvents events) {
+        TelegramBot fake = new TelegramBot(HttpClient.newHttpClient(), "123:ABC") {
+            @Override public String getManagedBotToken(long botUserId) { return "999:CHILD"; }
+        };
+        TelegramBotModule module = TelegramBotModule.builder("123:ABC", "manager_bot").bot(fake).build();
+        return new ManagedBotService(module, bots, new TokenEncryptor() {
+            @Override public String encrypt(String p) { return p; }
+            @Override public String decrypt(String c) { return c; }
+        }, events, 1, Duration.ZERO, intents, Duration.ofMinutes(30), Duration.ofDays(7));
+    }
+
+    @Test
+    void aConcurrentWinnerIsReportedAsAlreadyAssignedEvenWhenOurWriteFailed() {
+        InMemoryManagedBotStore bots = new InMemoryManagedBotStore();
+        FailingIntentStore intents = new FailingIntentStore();
+        ManagedBotService service = serviceOver(bots, intents, new RecordingEvents());
+        OffsetDateTime now = OffsetDateTime.now();
+        bots.save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+
+        String ours = service.createIntent(null, "Shop", "bot:1").intentId();
+        intents.save(intents.findById(ours).orElseThrow().claimedBy(7L, now));
+        String theirs = service.createIntent(null, "Cafe", "bot:2").intentId();
+        intents.save(intents.findById(theirs).orElseThrow().claimedBy(7L, now));
+
+        intents.failing = true;
+        // The concurrent winner's write lands exactly when ours fails.
+        intents.onFailingSave = () -> intents.save(intents.findById(theirs).orElseThrow().completedWith(555L, now));
+
+        assertReason(() -> service.assignToIntent(ours, 555L),
+                ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED);
+    }
+
+    @Test
+    void aGenuineStoreFailureIsNeverRenamedAsAlreadyAssigned() {
+        InMemoryManagedBotStore bots = new InMemoryManagedBotStore();
+        FailingIntentStore intents = new FailingIntentStore();
+        ManagedBotService service = serviceOver(bots, intents, new RecordingEvents());
+        OffsetDateTime now = OffsetDateTime.now();
+        bots.save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+
+        String id = service.createIntent(null, "Shop", "bot:1").intentId();
+        intents.save(intents.findById(id).orElseThrow().claimedBy(7L, now));
+
+        intents.failing = true;
+        assertThatThrownBy(() -> service.assignToIntent(id, 555L))
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage("store unavailable");
     }
 
     @Test

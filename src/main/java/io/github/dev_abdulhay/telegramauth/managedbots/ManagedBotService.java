@@ -531,7 +531,14 @@ public class ManagedBotService {
         try {
             intents.save(done);
         } catch (RuntimeException e) {
-            // The unique bot_user_id index is the real arbiter when two assignments race.
+            // Only a concurrent assignment explains a failure here, and the unique
+            // bot_user_id index is what arbitrates it — so ask the store who holds the
+            // bot now. Anything else is a genuine store failure and must not come back
+            // to the host wearing a business verdict it can act on.
+            if (intents.findByBotUserId(botUserId).isEmpty()) {
+                log.warn("could not assign managed bot {} to intent {}", botUserId, intentId, e);
+                throw e;
+            }
             throw new ManagedBotIntentException(ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED,
                     "managed bot " + botUserId + " was assigned concurrently", e);
         }
