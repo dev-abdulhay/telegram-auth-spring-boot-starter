@@ -176,6 +176,37 @@ public class ManagedBotService {
         intentStore.save(intent.cancelled());
     }
 
+    /**
+     * Resolves one {@code /start mb_<id>} tap. Public because a host that replaced
+     * {@code /start} with its own handler still needs this decision.
+     *
+     * <p>The first claim also runs the matching step: the bot may already exist when
+     * the link is opened — a host still handing out {@code createLink}, or a
+     * {@code fetchAndStore} recovery that landed first.
+     */
+    public IntentClaimResult claimIntent(String intentId, long ownerUserId) {
+        ManagedBotIntentStore intents = requireIntentStore();
+        ManagedBotIntent intent = intents.findById(intentId).map(this::expireIfDue).orElse(null);
+        if (intent == null) return new IntentClaimResult(IntentClaim.UNKNOWN, null);
+        boolean sameOwner = intent.ownerUserId() != null && intent.ownerUserId() == ownerUserId;
+        switch (intent.status()) {
+            case EXPIRED, CANCELLED:
+                return new IntentClaimResult(IntentClaim.CLOSED, intent);
+            case COMPLETED:
+                return new IntentClaimResult(
+                        sameOwner ? IntentClaim.COMPLETED : IntentClaim.OTHER_OWNER, intent);
+            case CLAIMED:
+                return new IntentClaimResult(
+                        sameOwner ? IntentClaim.RECLAIMED : IntentClaim.OTHER_OWNER, intent);
+            case OPEN:
+            default:
+                ManagedBotIntent claimed = intent.claimedBy(ownerUserId, OffsetDateTime.now());
+                intents.save(claimed);
+                publish("onIntentClaimed", () -> events.onIntentClaimed(claimed));
+                return new IntentClaimResult(IntentClaim.CLAIMED, matchOnClaim(claimed));
+        }
+    }
+
     private ManagedBotIntentStore requireIntentStore() {
         if (intentStore == null) {
             throw new IllegalStateException(
@@ -333,7 +364,7 @@ public class ManagedBotService {
         } catch (RuntimeException e) {
             log.warn("giving up on the token of managed bot {} after {} attempts",
                     botUserId, tokenFetchRetries, e);
-            events.onTokenFetchFailed(botUserId, ownerUserId, e);
+            publish("onTokenFetchFailed", () -> events.onTokenFetchFailed(botUserId, ownerUserId, e));
             return;
         }
 
@@ -436,6 +467,47 @@ public class ManagedBotService {
             List<ManagedBotIntent> byUsername = candidates.stream()
                     .filter(i -> i.suggestedUsername() != null
                             && i.suggestedUsername().equalsIgnoreCase(username))
+                    .toList();
+            if (byUsername.size() == 1) return byUsername.get(0);
+        }
+        return candidates.size() == 1 ? candidates.get(0) : null;
+    }
+
+    /** @return the intent as it now stands — {@code COMPLETED} when a waiting bot fit it */
+    private ManagedBotIntent matchOnClaim(ManagedBotIntent intent) {
+        List<ManagedBot> candidates = unassignedBotsFor(intent, true);
+        if (candidates.isEmpty()) return intent;
+        ManagedBot chosen = pickBot(candidates, intent.suggestedUsername());
+        if (chosen == null) {
+            publish("onIntentAmbiguous", () -> events.onIntentAmbiguous(intent, candidates));
+            return intent;
+        }
+        ManagedBotIntent done = intent.completedWith(chosen.botUserId(), OffsetDateTime.now());
+        intentStore.save(done);
+        publish("onIntentMatched", () -> events.onIntentMatched(chosen, done));
+        return done;
+    }
+
+    /**
+     * The creator's bots that no intent claims.
+     *
+     * @param sinceIntent {@code true} drops bots older than the intent — right for
+     *                    automatic matching, wrong for the manual screen, which is
+     *                    exactly where an older bot has to be reachable
+     */
+    private List<ManagedBot> unassignedBotsFor(ManagedBotIntent intent, boolean sinceIntent) {
+        if (intent.ownerUserId() == null) return List.of();
+        return store.findByOwnerUserId(intent.ownerUserId()).stream()
+                .filter(b -> intentStore.findByBotUserId(b.botUserId()).isEmpty())
+                .filter(b -> !sinceIntent || !b.createdAt().isBefore(intent.createdAt()))
+                .toList();
+    }
+
+    /** {@link #pickIntent} from the other side. */
+    private static ManagedBot pickBot(List<ManagedBot> candidates, String suggestedUsername) {
+        if (suggestedUsername != null) {
+            List<ManagedBot> byUsername = candidates.stream()
+                    .filter(b -> b.username() != null && suggestedUsername.equalsIgnoreCase(b.username()))
                     .toList();
             if (byUsername.size() == 1) return byUsername.get(0);
         }
