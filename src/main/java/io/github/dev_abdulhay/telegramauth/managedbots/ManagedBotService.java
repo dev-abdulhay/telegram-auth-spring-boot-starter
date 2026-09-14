@@ -5,10 +5,12 @@ import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
@@ -47,6 +49,13 @@ public class ManagedBotService {
     private static final Duration ECHO_TTL = Duration.ofMinutes(5);
     /** Hard ceiling on tracked bots, mirroring {@code CodeStrikeTracker}'s bound. */
     private static final int MAX_ECHOES = 10_000;
+    /** Base64URL of 16 random bytes: 22 chars, well inside Telegram's 64-char start payload. */
+    private static final int INTENT_ID_BYTES = 16;
+    private static final int MAX_HOST_REF = 128;
+    /** The purge is a database round trip; once a minute is plenty for a cleanup nobody waits on. */
+    private static final Duration PURGE_INTERVAL = Duration.ofMinutes(1);
+    private static final SecureRandom RNG = new SecureRandom();
+    private static final Base64.Encoder ID_ENC = Base64.getUrlEncoder().withoutPadding();
 
     /**
      * One self-initiated token change we expect Telegram to echo back.
@@ -69,16 +78,37 @@ public class ManagedBotService {
     private final ManagedBotEvents events;
     private final int tokenFetchRetries;
     private final Duration tokenFetchBackoff;
+    private final ManagedBotIntentStore intentStore;
+    private final Duration intentTtl;
+    private final Duration intentRetention;
+    /** JVM-local, like the echo map: several instances purging once a minute each is harmless. */
+    private volatile OffsetDateTime lastPurge;
 
     public ManagedBotService(TelegramBotModule module, ManagedBotTokenStore store,
                              TokenEncryptor encryptor, ManagedBotEvents events,
                              int tokenFetchRetries, Duration tokenFetchBackoff) {
+        this(module, store, encryptor, events, tokenFetchRetries, tokenFetchBackoff,
+                null, Duration.ofMinutes(30), Duration.ofDays(7));
+    }
+
+    /**
+     * @param intentStore {@code null} turns intents off completely: no matching runs
+     *                    and {@link #createIntent} refuses
+     */
+    public ManagedBotService(TelegramBotModule module, ManagedBotTokenStore store,
+                             TokenEncryptor encryptor, ManagedBotEvents events,
+                             int tokenFetchRetries, Duration tokenFetchBackoff,
+                             ManagedBotIntentStore intentStore, Duration intentTtl,
+                             Duration intentRetention) {
         this.module = module;
         this.store = store;
         this.encryptor = encryptor;
         this.events = events;
         this.tokenFetchRetries = Math.max(1, tokenFetchRetries);
         this.tokenFetchBackoff = tokenFetchBackoff == null ? Duration.ZERO : tokenFetchBackoff;
+        this.intentStore = intentStore;
+        this.intentTtl = intentTtl == null ? Duration.ofMinutes(30) : intentTtl;
+        this.intentRetention = intentRetention == null ? Duration.ofDays(7) : intentRetention;
     }
 
     /**
@@ -88,6 +118,105 @@ public class ManagedBotService {
      */
     public String createLink(String suggestedUsername, String suggestedName) {
         return ManagedBotLink.build(module.getUsername(), suggestedUsername, suggestedName);
+    }
+
+    /**
+     * A request to create one bot, and the link that claims it. The user opens the
+     * link, the manager bot learns who they are, and the bot they create afterwards
+     * is matched back to this intent by that identity — which is the one thing an
+     * edited username cannot break.
+     *
+     * @param suggestedUsername may be {@code null}; validated eagerly when present
+     * @param hostRef           opaque, at most 128 characters, never interpreted here
+     * @throws IllegalStateException    when no {@link ManagedBotIntentStore} is configured
+     * @throws IllegalArgumentException for a username Telegram could not accept, or an oversized {@code hostRef}
+     */
+    public ManagedBotIntentLink createIntent(String suggestedUsername, String suggestedName, String hostRef) {
+        ManagedBotIntentStore intents = requireIntentStore();
+        String username = trimToNull(suggestedUsername);
+        if (username != null) {
+            ManagedBotLink.validateUsername(username);
+        }
+        if (hostRef != null && hostRef.length() > MAX_HOST_REF) {
+            throw new IllegalArgumentException("hostRef must be at most " + MAX_HOST_REF
+                    + " characters but was " + hostRef.length());
+        }
+        purgeClosedIntents();
+        OffsetDateTime now = OffsetDateTime.now();
+        ManagedBotIntent intent = new ManagedBotIntent(newIntentId(), username,
+                trimToNull(suggestedName), hostRef, null, ManagedBotIntentStatus.OPEN, null,
+                now, null, null, now.plus(intentTtl));
+        intents.save(intent);
+        return new ManagedBotIntentLink(intent.id(),
+                "https://t.me/" + module.getUsername().trim() + "?start="
+                        + ManagedBotIntent.START_PREFIX + intent.id(),
+                intent.expiresAt());
+    }
+
+    /** The intent, with an overdue {@code OPEN} row reported — and stored — as {@code EXPIRED}. */
+    public Optional<ManagedBotIntent> findIntent(String intentId) {
+        return requireIntentStore().findById(intentId).map(this::expireIfDue);
+    }
+
+    /**
+     * Ends an intent the host no longer wants. {@code CLAIMED} intents never expire
+     * on their own, so this is the only way one leaves the matching pool.
+     *
+     * @throws ManagedBotIntentException {@code INTENT_NOT_FOUND}, or {@code INTENT_CLOSED}
+     *         when it is already completed, cancelled or expired
+     */
+    public void cancelIntent(String intentId) {
+        ManagedBotIntent intent = findIntent(intentId).orElseThrow(() -> new ManagedBotIntentException(
+                ManagedBotIntentException.Reason.INTENT_NOT_FOUND, "unknown intent " + intentId));
+        if (intent.status() != ManagedBotIntentStatus.OPEN
+                && intent.status() != ManagedBotIntentStatus.CLAIMED) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.INTENT_CLOSED,
+                    "intent " + intentId + " is " + intent.status());
+        }
+        intentStore.save(intent.cancelled());
+    }
+
+    private ManagedBotIntentStore requireIntentStore() {
+        if (intentStore == null) {
+            throw new IllegalStateException(
+                    "managed-bot intents need a ManagedBotIntentStore bean");
+        }
+        return intentStore;
+    }
+
+    /**
+     * Expiry is evaluated on read rather than by a scheduler: an intent nobody looks
+     * at costs nothing, and the retention purge reaps the rows this never touches.
+     */
+    private ManagedBotIntent expireIfDue(ManagedBotIntent intent) {
+        if (intent.status() == ManagedBotIntentStatus.OPEN
+                && intent.expiresAt().isBefore(OffsetDateTime.now())) {
+            ManagedBotIntent expired = intent.expired();
+            intentStore.save(expired);
+            return expired;
+        }
+        return intent;
+    }
+
+    private void purgeClosedIntents() {
+        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime last = lastPurge;
+        if (last != null && last.isAfter(now.minus(PURGE_INTERVAL))) return;
+        lastPurge = now;
+        int removed = intentStore.deleteClosedBefore(now.minus(intentRetention));
+        if (removed > 0) log.debug("purged {} closed managed-bot intents", removed);
+    }
+
+    private static String newIntentId() {
+        byte[] buf = new byte[INTENT_ID_BYTES];
+        RNG.nextBytes(buf);
+        return ID_ENC.encodeToString(buf);
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     /** The stored token, decrypted. Reads locally — never calls Telegram. */
