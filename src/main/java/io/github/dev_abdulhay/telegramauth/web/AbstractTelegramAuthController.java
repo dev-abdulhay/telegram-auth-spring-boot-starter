@@ -57,10 +57,23 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
                                         HttpServletRequest req) {
         String ip = clientIp(req);
         String ua = req.getHeader("User-Agent");
-        AbstractSessionService.CreatedSession created = sessionService.create(ip, ua);
+        AbstractSessionService.CreatedSession created = sessionService.create(ip, ua, hostRef(req));
         String deepLink = "https://t.me/" + module.getUsername() + "?start=" + created.rawToken();
         return new CreateSessionResponse(
                 created.rawToken(), deepLink, created.entity().getExpiresAt(), List.of("POLL"));
+    }
+
+    /**
+     * What this session is for, in the host's own terms — returned to the host's
+     * approve handler as {@code AuthContext#getHostRef()}. {@code null} means an
+     * ordinary login.
+     *
+     * <p>Derive it from server-side state only (an authenticated platform session,
+     * a signed cookie). It is deliberately <b>not</b> read from the request body:
+     * a client that could set it could point an approval at someone else's account.
+     */
+    protected String hostRef(HttpServletRequest request) {
+        return null;
     }
 
     /**

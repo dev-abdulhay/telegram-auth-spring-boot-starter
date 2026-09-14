@@ -46,6 +46,8 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
     protected static final List<Status> LIVE_STATUSES = List.of(Status.PENDING, Status.AWAITING_CODE);
     /** Matches the {@code approve_payload} column length on {@code BaseAuthSession}. */
     private static final int MAX_PAYLOAD_CHARS = 4000;
+    /** Matches the {@code host_ref} column length on {@code BaseAuthSession}. */
+    private static final int MAX_HOST_REF = 128;
 
     protected final BaseAuthSessionRepository<S> sessionRepo;
     private final Supplier<S> factory;
@@ -64,6 +66,12 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
 
     public record CreatedSession(String rawToken, BaseAuthSession entity) {}
 
+    /** Convenience overload for an ordinary login, with no host correlation. */
+    @Transactional
+    public CreatedSession create(String ipAddress, String userAgent) {
+        return create(ipAddress, userAgent, null);
+    }
+
     /**
      * <p><b>Best-effort limit.</b> The count and the insert are two statements,
      * not one atomic operation, so a burst of genuinely simultaneous requests
@@ -71,13 +79,21 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
      * flood brake, not a hard quota — put a real rate limiter (gateway, WAF,
      * bucket filter) in front if you need an exact ceiling.
      *
+     * @param hostRef opaque, at most 128 characters, never interpreted here. Set it
+     *                from server-side state only — it decides what an approval is
+     *                allowed to mean.
      * @throws SessionRateLimitException when the IP already holds
      *         {@code maxPendingPerIp} live (PENDING or AWAITING_CODE, not yet expired) sessions
      *         (0 disables the check). Overdue sessions are ignored so a caller
      *         is never blocked while waiting for the sweeper to run.
+     * @throws IllegalArgumentException when {@code hostRef} is longer than 128 characters
      */
     @Transactional
-    public CreatedSession create(String ipAddress, String userAgent) {
+    public CreatedSession create(String ipAddress, String userAgent, String hostRef) {
+        if (hostRef != null && hostRef.length() > MAX_HOST_REF) {
+            throw new IllegalArgumentException("hostRef must be at most " + MAX_HOST_REF
+                    + " characters but was " + hostRef.length());
+        }
         int limit = module.getMaxPendingPerIp();
         Long botUserId = module.getBotUserId();
         if (limit > 0 && ipAddress != null && !ipAddress.isBlank() && liveForIp(ipAddress, botUserId) >= limit) {
@@ -89,6 +105,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
         s.setTokenHash(tokenGenerator.hash(raw));
         s.setIpAddress(ipAddress);
         s.setUserAgent(userAgent);
+        s.setHostRef(hostRef);
         s.setCreatedAt(OffsetDateTime.now());
         s.setExpiresAt(s.getCreatedAt().plus(module.getSessionTtl()));
         s.setStatus(Status.PENDING);
@@ -171,7 +188,7 @@ public abstract class AbstractSessionService<U extends BaseTelegramUser, S exten
             return false;
         }
 
-        AuthContext ctx = new AuthContext(s.getIpAddress(), s.getUserAgent());
+        AuthContext ctx = new AuthContext(s.getIpAddress(), s.getUserAgent(), s.getHostRef());
         TelegramUserInfo info = new TelegramUserInfo(
                 user.getTelegramId(), user.getPhone(), user.getFirstName(),
                 user.getLastName(), user.getUsername(), user.getLanguageCode());

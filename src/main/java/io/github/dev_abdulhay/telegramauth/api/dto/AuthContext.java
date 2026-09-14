@@ -5,18 +5,25 @@ import java.util.Map;
 
 /**
  * Mutable context object passed into the host approve handler. Carries the
- * request-side details captured at session creation and a free-form attribute
- * map that {@code AuthContextEnricher} implementations can decorate.
+ * request-side details captured at session creation — IP, user agent and the
+ * host's own {@code hostRef} — plus a free-form attribute map a host can decorate
+ * before its handler reads it.
  */
 public final class AuthContext {
 
     private final String ipAddress;
     private final String userAgent;
+    private final String hostRef;
     private final Map<String, Object> attributes = new HashMap<>();
 
     public AuthContext(String ipAddress, String userAgent) {
+        this(ipAddress, userAgent, null);
+    }
+
+    public AuthContext(String ipAddress, String userAgent, String hostRef) {
         this.ipAddress = ipAddress;
         this.userAgent = userAgent;
+        this.hostRef = hostRef;
     }
 
     public String getIpAddress() {
@@ -25,6 +32,10 @@ public final class AuthContext {
 
     public String getUserAgent() {
         return userAgent;
+    }
+
+    public String getHostRef() {
+        return hostRef;
     }
 
     public Map<String, Object> getAttributes() {
