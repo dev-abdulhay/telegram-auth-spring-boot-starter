@@ -2,6 +2,8 @@ package io.github.dev_abdulhay.telegramauth.whitelabel;
 
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBot;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
+import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotIntent;
+import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotIntentStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -37,6 +39,13 @@ class TenantBotEventBridgeTest {
     static class RecordingHostEvents implements ManagedBotEvents {
         final List<String> calls;
         boolean fail;
+        ManagedBotIntent lastClaimedIntent;
+        ManagedBot lastMatchedBot;
+        ManagedBotIntent lastMatchedIntent;
+        ManagedBot lastUnmatchedBot;
+        List<ManagedBotIntent> lastUnmatchedCandidates;
+        ManagedBotIntent lastAmbiguousIntent;
+        List<ManagedBot> lastAmbiguousCandidates;
 
         RecordingHostEvents(List<String> calls) { this.calls = calls; }
 
@@ -45,6 +54,25 @@ class TenantBotEventBridgeTest {
         @Override public void onDecommissioned(long id) { record("onDecommissioned:" + id); }
         @Override public void onTokenFetchFailed(long id, long ownerId, Exception cause) {
             record("onTokenFetchFailed:" + id + ":" + ownerId);
+        }
+        @Override public void onIntentClaimed(ManagedBotIntent intent) {
+            lastClaimedIntent = intent;
+            record("onIntentClaimed:" + intent.id());
+        }
+        @Override public void onIntentMatched(ManagedBot bot, ManagedBotIntent intent) {
+            lastMatchedBot = bot;
+            lastMatchedIntent = intent;
+            record("onIntentMatched:" + bot.botUserId() + ":" + intent.id());
+        }
+        @Override public void onIntentUnmatched(ManagedBot bot, List<ManagedBotIntent> candidates) {
+            lastUnmatchedBot = bot;
+            lastUnmatchedCandidates = candidates;
+            record("onIntentUnmatched:" + bot.botUserId() + ":" + candidates.size());
+        }
+        @Override public void onIntentAmbiguous(ManagedBotIntent intent, List<ManagedBot> candidates) {
+            lastAmbiguousIntent = intent;
+            lastAmbiguousCandidates = candidates;
+            record("onIntentAmbiguous:" + intent.id() + ":" + candidates.size());
         }
 
         private void record(String call) {
@@ -78,6 +106,12 @@ class TenantBotEventBridgeTest {
     private static ManagedBot bot(long id) {
         OffsetDateTime now = OffsetDateTime.now();
         return new ManagedBot(id, "tenant_bot", "Tenant", 7L, "enc", now, now);
+    }
+
+    private static ManagedBotIntent intent(String id) {
+        OffsetDateTime now = OffsetDateTime.now();
+        return new ManagedBotIntent(id, "tenant_bot", "Tenant", "bot:1", 7L,
+                ManagedBotIntentStatus.CLAIMED, null, now, now, null, now.plusMinutes(30));
     }
 
     @Test
@@ -235,5 +269,97 @@ class TenantBotEventBridgeTest {
         bridge.onTokenFetchFailed(555L, 7L, new IllegalStateException("boom"));
 
         assertThat(registry.calls).containsExactly("start:555");
+    }
+
+    /**
+     * Intent events carry no bot to start or stop, so unlike the 0.4.0 callbacks
+     * there is no registry step to order against — only forwarding to verify. The
+     * bridge itself sits among the candidates, exactly as Spring would hand it
+     * back, so a broken identity filter would show up as extra or repeated calls
+     * instead of the single one asserted here.
+     */
+    @Test
+    void theFourIntentEventsReachTheHostExactlyOnceWithTheSameValues() {
+        RecordingRegistry registry = new RecordingRegistry();
+        RecordingHostEvents host = new RecordingHostEvents(new ArrayList<>());
+        List<ManagedBotEvents> candidates = new ArrayList<>(List.of(host));
+        TenantBotEventBridge<DemoU, DemoS> bridge =
+                new TenantBotEventBridge<>(registry, beans(candidates));
+        candidates.add(bridge); // as Spring sees it: the bridge is one of the beans
+
+        ManagedBot bot = bot(555L);
+        ManagedBotIntent claimed = intent("i1");
+        List<ManagedBotIntent> unmatchedCandidates = List.of(claimed);
+        List<ManagedBot> ambiguousCandidates = List.of(bot);
+
+        bridge.onIntentClaimed(claimed);
+        bridge.onIntentMatched(bot, claimed);
+        bridge.onIntentUnmatched(bot, unmatchedCandidates);
+        bridge.onIntentAmbiguous(claimed, ambiguousCandidates);
+
+        assertThat(host.calls).containsExactly(
+                "host:onIntentClaimed:i1",
+                "host:onIntentMatched:555:i1",
+                "host:onIntentUnmatched:555:1",
+                "host:onIntentAmbiguous:i1:1");
+        assertThat(host.lastClaimedIntent).isSameAs(claimed);
+        assertThat(host.lastMatchedBot).isSameAs(bot);
+        assertThat(host.lastMatchedIntent).isSameAs(claimed);
+        assertThat(host.lastUnmatchedBot).isSameAs(bot);
+        assertThat(host.lastUnmatchedCandidates).isSameAs(unmatchedCandidates);
+        assertThat(host.lastAmbiguousIntent).isSameAs(claimed);
+        assertThat(host.lastAmbiguousCandidates).isSameAs(ambiguousCandidates);
+        assertThat(registry.calls).isEmpty();
+    }
+
+    /**
+     * A host hook is no more trusted here than on the 0.4.0 events: its failure
+     * must not reach the manager bot's update worker thread, whether or not there
+     * was registry work in front of it to protect.
+     */
+    @Test
+    void aHostDelegateThrowingOnAnIntentEventDoesNotEscapeTheBridge() {
+        RecordingRegistry registry = new RecordingRegistry();
+        RecordingHostEvents host = new RecordingHostEvents(new ArrayList<>());
+        host.fail = true;
+        TenantBotEventBridge<DemoU, DemoS> bridge =
+                new TenantBotEventBridge<>(registry, beans(new ArrayList<>(List.of(host))));
+        ManagedBot bot = bot(555L);
+        ManagedBotIntent claimed = intent("i1");
+
+        assertThatCode(() -> {
+            bridge.onIntentClaimed(claimed);
+            bridge.onIntentMatched(bot, claimed);
+            bridge.onIntentUnmatched(bot, List.of(claimed));
+            bridge.onIntentAmbiguous(claimed, List.of(bot));
+        }).doesNotThrowAnyException();
+
+        assertThat(host.calls).containsExactly(
+                "host:onIntentClaimed:i1",
+                "host:onIntentMatched:555:i1",
+                "host:onIntentUnmatched:555:1",
+                "host:onIntentAmbiguous:i1:1");
+        assertThat(registry.calls).isEmpty();
+    }
+
+    /**
+     * Unlike {@code onCreated}/{@code onTokenRotated}/{@code onDecommissioned}, no
+     * intent event starts, restarts or stops a tenant bot — a bot's polling
+     * lifecycle is driven only by those three. Proved here with no host bean at
+     * all, so nothing but the registry itself could produce a call.
+     */
+    @Test
+    void intentEventsDriveNoRegistryWork() {
+        RecordingRegistry registry = new RecordingRegistry();
+        TenantBotEventBridge<DemoU, DemoS> bridge = new TenantBotEventBridge<>(registry);
+        ManagedBot bot = bot(555L);
+        ManagedBotIntent claimed = intent("i1");
+
+        bridge.onIntentClaimed(claimed);
+        bridge.onIntentMatched(bot, claimed);
+        bridge.onIntentUnmatched(bot, List.of(claimed));
+        bridge.onIntentAmbiguous(claimed, List.of(bot));
+
+        assertThat(registry.calls).isEmpty();
     }
 }
