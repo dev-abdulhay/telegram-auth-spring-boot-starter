@@ -1,5 +1,7 @@
 package io.github.dev_abdulhay.telegramauth.managedbots;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBot;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import org.junit.jupiter.api.Test;
@@ -40,6 +42,21 @@ class ManagedBotIntentServiceTest {
 
     record Env(InMemoryManagedBotStore bots, CountingIntentStore intents,
                RecordingEvents events, ManagedBotService service) { }
+
+    private static final ObjectMapper M = new ObjectMapper();
+
+    private static JsonNode managedBotUpdate(long botId, long ownerId, String username) throws Exception {
+        return M.readTree("{\"managed_bot\":{\"user\":{\"id\":" + ownerId + "},"
+                + "\"bot\":{\"id\":" + botId + ",\"username\":\"" + username + "\",\"first_name\":\"T\"}}}");
+    }
+
+    /** Claims an intent the way the flow does, so matching tests start from a CLAIMED row. */
+    private static String claimedIntent(Env e, long ownerUserId, String suggestedUsername) {
+        String id = e.service().createIntent(suggestedUsername, "Shop", "bot:1").intentId();
+        ManagedBotIntent stored = e.intents().findById(id).orElseThrow();
+        e.intents().save(stored.claimedBy(ownerUserId, OffsetDateTime.now()));
+        return id;
+    }
 
     static Env env() {
         TelegramBot fake = new TelegramBot(HttpClient.newHttpClient(), "123:ABC") {
@@ -153,5 +170,135 @@ class ManagedBotIntentServiceTest {
         e.service().createIntent("tenant_shop_bot", "Shop", "bot:3");
 
         assertThat(e.intents().purges).isEqualTo(1);
+    }
+
+    @Test
+    void aCreatedBotCompletesTheOnlyClaimedIntentOfItsOwner() throws Exception {
+        Env e = env();
+        String id = claimedIntent(e, 7L, "tenant_shop_bot");
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L, "edited_name_bot"));
+
+        assertThat(e.intents().findById(id)).get().satisfies(i -> {
+            assertThat(i.status()).isEqualTo(ManagedBotIntentStatus.COMPLETED);
+            assertThat(i.botUserId()).isEqualTo(555L);
+            assertThat(i.completedAt()).isNotNull();
+        });
+        assertThat(e.events().events).containsExactly("matched:555:" + id);
+    }
+
+    @Test
+    void theUsernameBreaksATieBetweenTwoClaimedIntents() throws Exception {
+        Env e = env();
+        String wanted = claimedIntent(e, 7L, "tenant_shop_bot");
+        claimedIntent(e, 7L, "tenant_cafe_bot");
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L, "TENANT_SHOP_BOT"));
+
+        assertThat(e.events().events).containsExactly("matched:555:" + wanted);
+    }
+
+    @Test
+    void twoIndistinguishableIntentsAreHandedToTheHostInsteadOfGuessed() throws Exception {
+        Env e = env();
+        claimedIntent(e, 7L, "tenant_shop_bot");
+        claimedIntent(e, 7L, "tenant_cafe_bot");
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L, "something_else_bot"));
+
+        assertThat(e.events().events).containsExactly("unmatched:555:2");
+        assertThat(e.intents().findByBotUserId(555L)).isEmpty();
+    }
+
+    /**
+     * On the creation path the newly stored bot's {@code createdAt} is always "now",
+     * so the age filter in {@code candidatesFor} can never exclude anything here —
+     * this proves something else: a stray unassigned bot that happens to share the
+     * creator's account never crowds out the real match. The age filter itself is
+     * exercised by the claim path in a later task.
+     */
+    @Test
+    void aNewBotMatchesEvenWhenItsOwnerAlsoHoldsAnOlderUnassignedBot() throws Exception {
+        Env e = env();
+        OffsetDateTime longAgo = OffsetDateTime.now().minusDays(3);
+        e.bots().save(new ManagedBot(555L, "old_bot", "Old", 7L, "ENC(x)", longAgo, longAgo));
+        String id = claimedIntent(e, 7L, "tenant_shop_bot");
+
+        e.service().handleUpdate(managedBotUpdate(556L, 7L, "tenant_shop_bot"));   // a different, new bot
+        assertThat(e.intents().findById(id)).get()
+                .extracting(ManagedBotIntent::botUserId).isEqualTo(556L);
+    }
+
+    @Test
+    void anotherOwnersIntentIsNeverMatched() throws Exception {
+        Env e = env();
+        String id = claimedIntent(e, 8L, "tenant_shop_bot");
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L, "tenant_shop_bot"));
+
+        assertThat(e.intents().findById(id)).get()
+                .extracting(ManagedBotIntent::status).isEqualTo(ManagedBotIntentStatus.CLAIMED);
+        assertThat(e.events().events).isEmpty();
+    }
+
+    @Test
+    void aRotationNeverMatchesAndAReDeliveredUpdateNeverMatchesTwice() throws Exception {
+        Env e = env();
+        String id = claimedIntent(e, 7L, "tenant_shop_bot");
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L, "tenant_shop_bot"));
+        e.service().handleUpdate(managedBotUpdate(555L, 7L, "tenant_shop_bot"));   // re-delivery = rotation
+
+        assertThat(e.events().events).containsExactly("matched:555:" + id);
+    }
+
+    @Test
+    void withNoCandidatesNothingHappensAtAll() throws Exception {
+        Env e = env();
+
+        e.service().handleUpdate(managedBotUpdate(555L, 7L, "tenant_shop_bot"));
+
+        assertThat(e.events().events).isEmpty();
+        assertThat(e.bots().findByBotUserId(555L)).isPresent();
+    }
+
+    @Test
+    void recoveryThroughFetchAndStoreAlsoMatches() {
+        Env e = env();
+        String id = claimedIntent(e, 7L, "tenant_shop_bot");
+
+        e.service().fetchAndStore(555L, 7L);
+
+        assertThat(e.intents().findById(id)).get()
+                .extracting(ManagedBotIntent::status).isEqualTo(ManagedBotIntentStatus.COMPLETED);
+    }
+
+    @Test
+    void aListenerThrowingInOnCreatedDoesNotCostTheIntentEvent() throws Exception {
+        Env base = env();
+        List<String> seen = new ArrayList<>();
+        ManagedBotEvents throwing = new ManagedBotEvents() {
+            @Override public void onCreated(ManagedBot bot) { throw new IllegalStateException("host bug"); }
+            @Override public void onIntentMatched(ManagedBot bot, ManagedBotIntent intent) {
+                seen.add("matched:" + intent.id());
+            }
+        };
+        ManagedBotService service = new ManagedBotService(
+                TelegramBotModule.builder("123:ABC", "manager_bot").bot(new TelegramBot(
+                        HttpClient.newHttpClient(), "123:ABC") {
+                    @Override public String getManagedBotToken(long botUserId) { return "999:CHILD"; }
+                }).build(),
+                base.bots(), new TokenEncryptor() {
+                    @Override public String encrypt(String p) { return p; }
+                    @Override public String decrypt(String c) { return c; }
+                }, throwing, 1, Duration.ZERO, base.intents(), Duration.ofMinutes(30), Duration.ofDays(7));
+        String id = base.service().createIntent("tenant_shop_bot", "Shop", "bot:1").intentId();
+        base.intents().save(base.intents().findById(id).orElseThrow().claimedBy(7L, OffsetDateTime.now()));
+
+        service.handleUpdate(managedBotUpdate(555L, 7L, "tenant_shop_bot"));
+
+        assertThat(seen).containsExactly("matched:" + id);
+        assertThat(base.intents().findById(id)).get()
+                .extracting(ManagedBotIntent::status).isEqualTo(ManagedBotIntentStatus.COMPLETED);
     }
 }
