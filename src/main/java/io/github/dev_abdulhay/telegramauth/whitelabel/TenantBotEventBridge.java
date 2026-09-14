@@ -4,11 +4,13 @@ import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession;
 import io.github.dev_abdulhay.telegramauth.entity.BaseTelegramUser;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBot;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
+import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotIntent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.beans.factory.ObjectProvider;
 
+import java.util.List;
 import java.util.function.Consumer;
 
 /**
@@ -88,6 +90,32 @@ public class TenantBotEventBridge<U extends BaseTelegramUser, S extends BaseAuth
     @Override
     public void onTokenFetchFailed(long botUserId, long ownerUserId, Exception cause) {
         forward("onTokenFetchFailed", botUserId, d -> d.onTokenFetchFailed(botUserId, ownerUserId, cause));
+    }
+
+    /**
+     * Intent events drive no registry work — a bot starts on {@code onCreated}, not on
+     * the bookkeeping around it — so these only forward. Without them a white-label
+     * host would never see intents at all: this bridge is the {@code ManagedBotEvents}
+     * bean the service is wired with.
+     */
+    @Override
+    public void onIntentClaimed(ManagedBotIntent intent) {
+        forward("onIntentClaimed", 0L, d -> d.onIntentClaimed(intent));
+    }
+
+    @Override
+    public void onIntentMatched(ManagedBot bot, ManagedBotIntent intent) {
+        forward("onIntentMatched", bot.botUserId(), d -> d.onIntentMatched(bot, intent));
+    }
+
+    @Override
+    public void onIntentUnmatched(ManagedBot bot, List<ManagedBotIntent> candidates) {
+        forward("onIntentUnmatched", bot.botUserId(), d -> d.onIntentUnmatched(bot, candidates));
+    }
+
+    @Override
+    public void onIntentAmbiguous(ManagedBotIntent intent, List<ManagedBot> candidates) {
+        forward("onIntentAmbiguous", 0L, d -> d.onIntentAmbiguous(intent, candidates));
     }
 
     /**
