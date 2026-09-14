@@ -141,7 +141,13 @@ public class ManagedBotService {
             throw new IllegalArgumentException("hostRef must be at most " + MAX_HOST_REF
                     + " characters but was " + hostRef.length());
         }
-        purgeClosedIntents();
+        try {
+            purgeClosedIntents();
+        } catch (RuntimeException e) {
+            // The purge is retention housekeeping nobody is waiting on; it must never
+            // fail the host's createIntent call just because a cleanup round trip did.
+            log.warn("managed-bot intent purge failed", e);
+        }
         OffsetDateTime now = OffsetDateTime.now();
         ManagedBotIntent intent = new ManagedBotIntent(newIntentId(), username,
                 trimToNull(suggestedName), hostRef, null, ManagedBotIntentStatus.OPEN, null,
@@ -203,7 +209,18 @@ public class ManagedBotService {
                 ManagedBotIntent claimed = intent.claimedBy(ownerUserId, OffsetDateTime.now());
                 intents.save(claimed);
                 publish("onIntentClaimed", () -> events.onIntentClaimed(claimed));
-                return new IntentClaimResult(IntentClaim.CLAIMED, matchOnClaim(claimed));
+                ManagedBotIntent afterMatch = claimed;
+                try {
+                    afterMatch = matchOnClaim(claimed);
+                } catch (RuntimeException e) {
+                    // The claim itself already succeeded and was announced: if matching
+                    // throws and we let it out, onStart throws, the dispatcher swallows it,
+                    // and the user who just tapped the link gets no reply at all. Falling
+                    // back to the claimed-but-unmatched intent still lets the create-bot
+                    // prompt go out; a re-tap simply tries the match again.
+                    log.warn("intent matching failed on claim for intent {}", intentId, e);
+                }
+                return new IntentClaimResult(IntentClaim.CLAIMED, afterMatch);
         }
     }
 
@@ -421,7 +438,16 @@ public class ManagedBotService {
         if (known.isEmpty()) {
             // Matching first: it only writes rows. Publishing comes after, so a listener
             // that throws cannot leave an intent half-linked or swallow the intent event.
-            Runnable intentEvent = matchOnCreation(saved);
+            Runnable intentEvent = null;
+            try {
+                intentEvent = matchOnCreation(saved);
+            } catch (RuntimeException e) {
+                // The bot is already stored and Telegram's offset has moved on: if this
+                // throws and we let it out, onCreated never fires and no update is ever
+                // re-delivered to try again. The intent simply stays CLAIMED, which the
+                // manual resolution screen already knows how to finish.
+                log.warn("intent matching failed for managed bot {}", saved.botUserId(), e);
+            }
             publish("onCreated", () -> events.onCreated(saved));
             if (intentEvent != null) intentEvent.run();
         } else {
@@ -535,7 +561,16 @@ public class ManagedBotService {
             // bot_user_id index is what arbitrates it — so ask the store who holds the
             // bot now. Anything else is a genuine store failure and must not come back
             // to the host wearing a business verdict it can act on.
-            if (intents.findByBotUserId(botUserId).isEmpty()) {
+            boolean taken;
+            try {
+                taken = intents.findByBotUserId(botUserId).isPresent();
+            } catch (RuntimeException probe) {
+                // The store is failing hard enough that even the probe cannot run — the
+                // save failure is the real news, and losing it would leave a silent hole.
+                e.addSuppressed(probe);
+                throw e;
+            }
+            if (!taken) {
                 log.warn("could not assign managed bot {} to intent {}", botUserId, intentId, e);
                 throw e;
             }

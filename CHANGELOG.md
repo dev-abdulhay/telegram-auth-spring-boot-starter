@@ -137,6 +137,18 @@ which every host must add. See **Migration** below.
   direct path in line with the white-label bridge, which has always guarded every
   callback. Hosts that relied on a throw to abort anything must record the
   failure themselves.
+- **Three more intent-store call sites are now guarded**, all in paths a 0.4.0
+  host already depended on with no intent store involved at all: the auto-match
+  run right after a bot is stored (`ManagedBotService#handleUpdate`), the
+  retention purge inside `createIntent`, and the claim-time match inside
+  `claimIntent`. A throwing store is caught and logged at `WARN` instead of
+  escaping — otherwise a store outage would cost the bot its `onCreated` event
+  (with no update ever re-delivered to try again), fail `createIntent` over
+  housekeeping nobody is waiting on, or leave the user who tapped an intent link
+  with no reply at all.
+- `assignToIntent`'s failure-translation catch no longer loses the original save
+  exception when the concurrent-winner probe it runs afterwards also fails. The
+  probe failure is attached to it as a suppressed exception instead.
 - `AuthContext`'s javadoc no longer refers to an `AuthContextEnricher` type. No
   such type exists anywhere in the repository and none ever did; the class now
   describes what it actually carries.
@@ -183,6 +195,12 @@ which every host must add. See **Migration** below.
   permission check); a new `## Linking a Telegram account to a host account`
   section; `## Upgrading to 0.5.0`; the two new properties in the managed-bots
   configuration table; install snippets at `0.5.0`; roadmap ticks.
+- README: `assignToIntent` now notes it should be called outside the host's own
+  transaction, since the store flushes to let the unique `bot_user_id` index
+  arbitrate a concurrent assignment. The `/start` routing section no longer
+  claims an unclaimed payload with no `/start` handler logs anything (it
+  doesn't) or behaves "as before" (a matched start-payload route now consumes
+  the update and returns, instead of falling through to the text handler).
 - `tasks/tech-doc/TECH_DOC.md` §9.2 no longer claims bot texts are
   `messages_tgauth*.properties` resolved through Spring's `MessageSource`, and
   its component map lists the managed-bots and intent types.

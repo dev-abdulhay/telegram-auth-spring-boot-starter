@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -41,6 +42,31 @@ class ManagedBotIntentServiceTest {
                 throw new IllegalStateException("store unavailable");
             }
             super.save(intent);
+        }
+    }
+
+    /**
+     * Lets a test make one specific lookup throw, independently of the others, so
+     * {@code matchOnCreation}, the retention purge, and {@code matchOnClaim} can each
+     * be exercised on their own without the store rejecting a write none of those
+     * guards are meant to touch.
+     */
+    static class SelectivelyFailingIntentStore extends InMemoryManagedBotIntentStore {
+        boolean failFindByBotUserId;
+        boolean failFindClaimedByOwner;
+        boolean failDeleteClosedBefore;
+
+        @Override public Optional<ManagedBotIntent> findByBotUserId(long botUserId) {
+            if (failFindByBotUserId) throw new IllegalStateException("store unavailable");
+            return super.findByBotUserId(botUserId);
+        }
+        @Override public List<ManagedBotIntent> findClaimedByOwner(long ownerUserId) {
+            if (failFindClaimedByOwner) throw new IllegalStateException("store unavailable");
+            return super.findClaimedByOwner(ownerUserId);
+        }
+        @Override public int deleteClosedBefore(OffsetDateTime cutoff) {
+            if (failDeleteClosedBefore) throw new IllegalStateException("store unavailable");
+            return super.deleteClosedBefore(cutoff);
         }
     }
 
@@ -191,6 +217,23 @@ class ManagedBotIntentServiceTest {
         assertThat(e.intents().purges).isEqualTo(1);
     }
 
+    /**
+     * Finding 1b: the retention purge is housekeeping nobody waits on. A failure
+     * there must not fail the host's {@code createIntent} call.
+     */
+    @Test
+    void aFailingRetentionPurgeStillReturnsAWorkingLinkAndSavesTheIntent() {
+        InMemoryManagedBotStore bots = new InMemoryManagedBotStore();
+        SelectivelyFailingIntentStore intents = new SelectivelyFailingIntentStore();
+        ManagedBotService service = serviceOver(bots, intents, new RecordingEvents());
+        intents.failDeleteClosedBefore = true;
+
+        ManagedBotIntentLink link = service.createIntent("tenant_shop_bot", "Shop", "bot:1");
+
+        assertThat(link.url()).isEqualTo("https://t.me/manager_bot?start=mb_" + link.intentId());
+        assertThat(intents.findById(link.intentId())).isPresent();
+    }
+
     @Test
     void aCreatedBotCompletesTheOnlyClaimedIntentOfItsOwner() throws Exception {
         Env e = env();
@@ -204,6 +247,29 @@ class ManagedBotIntentServiceTest {
             assertThat(i.completedAt()).isNotNull();
         });
         assertThat(e.events().events).containsExactly("matched:555:" + id);
+    }
+
+    /**
+     * Finding 1a: {@code matchOnCreation} runs outside any guard in 0.4.0 code paths
+     * a host already depends on. A throwing intent lookup must not cost the bot its
+     * row or its {@code onCreated} event — otherwise the bot is stored, Telegram's
+     * offset has moved on, and nothing ever re-delivers the update to try again.
+     */
+    @Test
+    void aFailingIntentLookupOnCreationStillStoresTheBotAndPublishesOnCreated() throws Exception {
+        InMemoryManagedBotStore bots = new InMemoryManagedBotStore();
+        SelectivelyFailingIntentStore intents = new SelectivelyFailingIntentStore();
+        List<Long> created = new ArrayList<>();
+        ManagedBotEvents events = new ManagedBotEvents() {
+            @Override public void onCreated(ManagedBot bot) { created.add(bot.botUserId()); }
+        };
+        ManagedBotService service = serviceOver(bots, intents, events);
+        intents.failFindByBotUserId = true;
+
+        service.handleUpdate(managedBotUpdate(555L, 7L, "tenant_shop_bot"));
+
+        assertThat(bots.findByBotUserId(555L)).isPresent();
+        assertThat(created).containsExactly(555L);
     }
 
     @Test
@@ -332,6 +398,32 @@ class ManagedBotIntentServiceTest {
         assertThat(r.intent().ownerUserId()).isEqualTo(7L);
         assertThat(r.intent().claimedAt()).isNotNull();
         assertThat(e.events().events).containsExactly("claimed:" + id);
+    }
+
+    /**
+     * Finding 1c: the claim is already saved and {@code onIntentClaimed} already
+     * published by the time {@code matchOnClaim} runs. If it throws and we let that
+     * out, {@code ManagedBotIntentFlow.onStart} throws, the dispatcher swallows it,
+     * and the user who tapped the link gets no reply at all. The claim must stand
+     * even when the match attempt fails.
+     */
+    @Test
+    void aFailingClaimTimeMatchStillClaimsTheIntentAndPublishesOnIntentClaimed() {
+        InMemoryManagedBotStore bots = new InMemoryManagedBotStore();
+        SelectivelyFailingIntentStore intents = new SelectivelyFailingIntentStore();
+        RecordingEvents events = new RecordingEvents();
+        ManagedBotService service = serviceOver(bots, intents, events);
+        OffsetDateTime now = OffsetDateTime.now();
+        bots.save(new ManagedBot(555L, "tenant_shop_bot", "Shop", 7L, "ENC(x)", now, now));
+        String id = service.createIntent("tenant_shop_bot", "Shop", "bot:1").intentId();
+        intents.failFindByBotUserId = true;
+
+        IntentClaimResult r = service.claimIntent(id, 7L);
+
+        assertThat(r.outcome()).isEqualTo(IntentClaim.CLAIMED);
+        assertThat(r.intent().status()).isEqualTo(ManagedBotIntentStatus.CLAIMED);
+        assertThat(r.intent().botUserId()).isNull();
+        assertThat(events.events).containsExactly("claimed:" + id);
     }
 
     @Test
@@ -537,6 +629,56 @@ class ManagedBotIntentServiceTest {
         assertThatThrownBy(() -> service.assignToIntent(id, 555L))
                 .isExactlyInstanceOf(IllegalStateException.class)
                 .hasMessage("store unavailable");
+    }
+
+    /**
+     * Like {@link FailingIntentStore}, but the concurrent-winner probe
+     * ({@code findByBotUserId}) the catch block runs after a failed save can also be
+     * made to fail — turned on at the exact moment {@code save} throws, so the
+     * pre-save "already assigned?" check upstream still succeeds normally and only
+     * the post-save probe is affected.
+     */
+    static class SaveThenProbeFailingIntentStore extends InMemoryManagedBotIntentStore {
+        boolean failing;
+        boolean failProbe;
+        @Override public void save(ManagedBotIntent intent) {
+            if (failing) {
+                failing = false;
+                failProbe = true;
+                throw new IllegalStateException("store unavailable");
+            }
+            super.save(intent);
+        }
+        @Override public Optional<ManagedBotIntent> findByBotUserId(long botUserId) {
+            if (failProbe) throw new IllegalStateException("probe unavailable");
+            return super.findByBotUserId(botUserId);
+        }
+    }
+
+    /**
+     * Finding 3: when the store is failing hard enough that even the concurrent-winner
+     * probe cannot run, the original save exception is the real news. Losing it in
+     * favour of whatever the probe threw would leave a silent hole, so it must come
+     * out unchanged, with the probe failure attached as a suppressed exception.
+     */
+    @Test
+    void whenTheProbeAlsoFailsTheOriginalSaveExceptionComesOutWithItSuppressed() {
+        InMemoryManagedBotStore bots = new InMemoryManagedBotStore();
+        SaveThenProbeFailingIntentStore intents = new SaveThenProbeFailingIntentStore();
+        ManagedBotService service = serviceOver(bots, intents, new RecordingEvents());
+        OffsetDateTime now = OffsetDateTime.now();
+        bots.save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+        String id = service.createIntent(null, "Shop", "bot:1").intentId();
+        intents.save(intents.findById(id).orElseThrow().claimedBy(7L, now));
+
+        intents.failing = true;
+
+        assertThatThrownBy(() -> service.assignToIntent(id, 555L))
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage("store unavailable")
+                .matches(e -> e.getSuppressed().length == 1)
+                .matches(e -> e.getSuppressed()[0] instanceof IllegalStateException)
+                .matches(e -> "probe unavailable".equals(e.getSuppressed()[0].getMessage()));
     }
 
     @Test
