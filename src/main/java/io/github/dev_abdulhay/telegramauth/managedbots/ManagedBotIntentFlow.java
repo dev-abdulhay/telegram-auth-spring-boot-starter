@@ -26,7 +26,6 @@ public class ManagedBotIntentFlow {
 
     private static final Logger log = LoggerFactory.getLogger(ManagedBotIntentFlow.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String START = "/start ";
 
     private final TelegramBotModule module;
     private final ManagedBotService service;
@@ -42,14 +41,18 @@ public class ManagedBotIntentFlow {
         JsonNode message = update.path("message");
         JsonNode from = message.path("from");
         long userId = from.path("id").asLong();
-        if (message.path("chat").path("id").asLong() != userId) {
+        if (!isPrivateChat(message)) {
             // Groups and channels: the chat id is not a user id there, and an intent
             // must never be claimed from a chat where anyone could tap the link.
             log.debug("/start intent payload outside a private chat ignored");
             return true;
         }
         String text = message.path("text").asText("");
-        String payload = text.length() > START.length() ? text.substring(START.length()).trim() : "";
+        // Mirrors how the dispatcher itself finds the payload (BotUpdateDispatcher#startRouteFor):
+        // the first token can carry a "@botname" suffix ("/start@manager_bot mb_x"), so the
+        // payload is whatever follows the first space, not a fixed-length prefix cut.
+        int space = text.indexOf(' ');
+        String payload = space < 0 ? "" : text.substring(space + 1).trim();
         if (!payload.startsWith(ManagedBotIntent.START_PREFIX)) return false;
         String intentId = payload.substring(ManagedBotIntent.START_PREFIX.length());
         String lang = FlowMessages.resolveLang(from.path("language_code").asText(null));
@@ -101,5 +104,19 @@ public class ManagedBotIntentFlow {
         } catch (Exception e) {
             throw new IllegalStateException("could not serialize a reply markup", e);
         }
+    }
+
+    /**
+     * A Telegram private chat always has {@code chat.id == from.id}; anywhere
+     * else (group, supergroup, channel) the chat id is not a user id. Mirrors
+     * {@code DefaultAuthFlow}'s own check exactly, including the {@code from.id
+     * != 0} guard against an update with no identity at all and the chat-type
+     * allow-list, so the two flows agree on what counts as private.
+     */
+    private static boolean isPrivateChat(JsonNode message) {
+        long userId = message.path("from").path("id").asLong();
+        long chatId = message.path("chat").path("id").asLong();
+        String type = message.path("chat").path("type").asText("");
+        return userId != 0 && chatId == userId && (type.isEmpty() || "private".equals(type));
     }
 }
