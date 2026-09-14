@@ -301,4 +301,91 @@ class ManagedBotIntentServiceTest {
         assertThat(base.intents().findById(id)).get()
                 .extracting(ManagedBotIntent::status).isEqualTo(ManagedBotIntentStatus.COMPLETED);
     }
+
+    @Test
+    void theFirstClaimRecordsTheOwnerAndAnnouncesIt() {
+        Env e = env();
+        String id = e.service().createIntent("tenant_shop_bot", "Shop", "bot:1").intentId();
+
+        IntentClaimResult r = e.service().claimIntent(id, 7L);
+
+        assertThat(r.outcome()).isEqualTo(IntentClaim.CLAIMED);
+        assertThat(r.intent().ownerUserId()).isEqualTo(7L);
+        assertThat(r.intent().claimedAt()).isNotNull();
+        assertThat(e.events().events).containsExactly("claimed:" + id);
+    }
+
+    @Test
+    void theSameUserTappingAgainIsIdempotent() {
+        Env e = env();
+        String id = e.service().createIntent("tenant_shop_bot", "Shop", "bot:1").intentId();
+        e.service().claimIntent(id, 7L);
+
+        assertThat(e.service().claimIntent(id, 7L).outcome()).isEqualTo(IntentClaim.RECLAIMED);
+        assertThat(e.events().events).containsExactly("claimed:" + id);
+    }
+
+    @Test
+    void aForwardedLinkCannotBeStolenBySomeoneElse() {
+        Env e = env();
+        String id = e.service().createIntent("tenant_shop_bot", "Shop", "bot:1").intentId();
+        e.service().claimIntent(id, 7L);
+
+        IntentClaimResult r = e.service().claimIntent(id, 8L);
+
+        assertThat(r.outcome()).isEqualTo(IntentClaim.OTHER_OWNER);
+        assertThat(e.service().findIntent(id)).get()
+                .extracting(ManagedBotIntent::ownerUserId).isEqualTo(7L);
+    }
+
+    @Test
+    void anUnknownPayloadIsNotOursAndAClosedOneIs() {
+        Env e = env();
+        String id = e.service().createIntent("tenant_shop_bot", "Shop", "bot:1").intentId();
+        e.service().cancelIntent(id);
+
+        assertThat(e.service().claimIntent("not-an-intent", 7L).outcome()).isEqualTo(IntentClaim.UNKNOWN);
+        assertThat(e.service().claimIntent(id, 7L).outcome()).isEqualTo(IntentClaim.CLOSED);
+    }
+
+    @Test
+    void claimingCompletesTheIntentWhenTheBotWasCreatedFirst() {
+        Env e = env();
+        String id = e.service().createIntent("tenant_shop_bot", "Shop", "bot:1").intentId();
+        OffsetDateTime now = OffsetDateTime.now();
+        e.bots().save(new ManagedBot(555L, "tenant_shop_bot", "Shop", 7L, "ENC(x)", now, now));
+
+        IntentClaimResult r = e.service().claimIntent(id, 7L);
+
+        assertThat(r.intent().status()).isEqualTo(ManagedBotIntentStatus.COMPLETED);
+        assertThat(r.intent().botUserId()).isEqualTo(555L);
+        assertThat(e.events().events).containsExactly("claimed:" + id, "matched:555:" + id);
+    }
+
+    @Test
+    void claimingWithTwoUnassignedBotsAsksTheHostToDecide() {
+        Env e = env();
+        String id = e.service().createIntent(null, "Shop", "bot:1").intentId();
+        OffsetDateTime now = OffsetDateTime.now();
+        e.bots().save(new ManagedBot(555L, "one_bot", "One", 7L, "ENC(x)", now, now));
+        e.bots().save(new ManagedBot(556L, "two_bot", "Two", 7L, "ENC(x)", now, now));
+
+        IntentClaimResult r = e.service().claimIntent(id, 7L);
+
+        assertThat(r.intent().status()).isEqualTo(ManagedBotIntentStatus.CLAIMED);
+        assertThat(e.events().events).containsExactly("claimed:" + id, "ambiguous:" + id + ":2");
+    }
+
+    @Test
+    void claimingIgnoresBotsOlderThanTheIntent() {
+        Env e = env();
+        String id = e.service().createIntent("tenant_shop_bot", "Shop", "bot:1").intentId();
+        OffsetDateTime longAgo = OffsetDateTime.now().minusDays(3);
+        e.bots().save(new ManagedBot(555L, "tenant_shop_bot", "Shop", 7L, "ENC(x)", longAgo, longAgo));
+
+        IntentClaimResult r = e.service().claimIntent(id, 7L);
+
+        assertThat(r.intent().status()).isEqualTo(ManagedBotIntentStatus.CLAIMED);
+        assertThat(e.events().events).containsExactly("claimed:" + id);
+    }
 }
