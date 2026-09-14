@@ -5,6 +5,188 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-15
+
+Two features that compose. **Managed-bot intents** close the hole the 0.4.0
+managed-bots feature left open: the `/newbot` deep link carries no payload of
+the host's, so the only thing a host could correlate a created bot with was the
+suggested username — which Telegram lets the user edit in the confirmation
+dialog. When they do, the bot arrives orphaned and nothing can repair it
+automatically. An intent records the request *before* the link is handed out,
+the user proves their Telegram id by opening that link on the manager bot, and
+the created bot is matched back by that id instead. **Host-account linking**
+carries one opaque `hostRef` from session creation into the approve handler, so
+a host can finally tell "someone is logging in" from "admin 7 is linking their
+Telegram" — and the bot-creation flow is what links an admin's Telegram in the
+first place.
+
+Everything here is additive except one new nullable column on the session table,
+which every host must add. See **Migration** below.
+
+### Added
+- **Managed-bot intents** (`io.github.dev_abdulhay.telegramauth.managedbots`), an
+  opt-in layer on top of managed bots: declare a `ManagedBotIntentStore` bean and
+  it turns on; leave it out and nothing changes. `ManagedBotIntent` (a record
+  carrying `id`, `suggestedUsername`, `suggestedName`, `hostRef`, `ownerUserId`,
+  `status`, `botUserId` and four `OffsetDateTime` timestamps, plus the
+  `START_PREFIX = "mb_"` constant), `ManagedBotIntentStatus`
+  (`OPEN`/`CLAIMED`/`COMPLETED`/`EXPIRED`/`CANCELLED`) and `ManagedBotIntentLink`
+  (`intentId`, `url`, `expiresAt`).
+- `ManagedBotIntentStore` with `save` (upsert by id), `findById`,
+  `findByBotUserId`, `findClaimedByOwner` and `deleteClosedBefore(cutoff)`, plus
+  two implementations: `InMemoryManagedBotIntentStore` (map-backed, not durable)
+  and `JpaManagedBotIntentStore<I extends BaseManagedBotIntent>`, paired with the
+  `@MappedSuperclass BaseManagedBotIntent` and
+  `BaseManagedBotIntentRepository<I>` a host subclasses with its own entity. As
+  with `managed_bot`, the library registers no store bean and creates no table —
+  the host owns both. The id is **assigned, not generated**: it is minted by
+  `ManagedBotService`, travels in a `/start` payload and is looked up by that
+  value.
+- `ManagedBotService` intent methods: `createIntent(suggestedUsername,
+  suggestedName, hostRef)` returning the `ManagedBotIntentLink` whose `url` is
+  `https://t.me/<manager>?start=mb_<intentId>`; `findIntent(intentId)` (reporting
+  and persisting an overdue `OPEN` row as `EXPIRED`); `claimIntent(intentId,
+  ownerUserId)` returning an `IntentClaimResult`, public because a host that
+  replaced `/start` with its own handler still needs the decision;
+  `cancelIntent(intentId)`; and the three manual-resolution methods
+  `findUnassignedBots(intentId)`, `assignToIntent(intentId, botUserId)` and
+  `decommissionUnassigned(botUserId)`.
+- A nine-argument `ManagedBotService` constructor — `(module, store, encryptor,
+  events, tokenFetchRetries, tokenFetchBackoff, ManagedBotIntentStore, Duration
+  intentTtl, Duration intentRetention)`. The 0.4.0 six-argument constructor is
+  unchanged and delegates to it with a `null` store, which turns intents off
+  completely.
+- `IntentClaim` (`CLAIMED`, `RECLAIMED`, `COMPLETED`, `OTHER_OWNER`, `CLOSED`,
+  `UNKNOWN`) and `IntentClaimResult(outcome, intent)`; and
+  `ManagedBotIntentException` with a `Reason` enum — `INTENT_NOT_FOUND`,
+  `INTENT_NOT_CLAIMED`, `INTENT_CLOSED`, `BOT_NOT_FOUND`, `OWNER_MISMATCH`,
+  `BOT_ALREADY_ASSIGNED` — for runtime outcomes a host UI branches on.
+  Misconfiguration stays an `IllegalStateException` (no intent store bean, the
+  same way a missing encryption key is) and an unusable suggested username stays
+  an `IllegalArgumentException`, validated eagerly at `createIntent` with
+  `ManagedBotLink`'s rules so it never surfaces on the update worker thread.
+- **Automatic matching**, run on creation (from `handleUpdate` and from a
+  `fetchAndStore` recovery — never on a rotation, never for an echo of the
+  library's own token change) and once more on the first claim, because the bot
+  may already exist by then. Candidates are the creator's `CLAIMED` intents,
+  filtered to `bot.createdAt() >= intent.createdAt()` so a bot created for some
+  other purpose before the intent existed is never auto-matched; a single
+  username hit wins, else a single candidate wins, else nothing is linked and the
+  host is asked. The match is persisted **before** any event is published.
+- Four `ManagedBotEvents` hooks, all `default` no-ops:
+  `onIntentClaimed(intent)`, `onIntentMatched(bot, intent)`,
+  `onIntentUnmatched(bot, candidates)` (one bot, several intents — the creation
+  path) and `onIntentAmbiguous(intent, candidates)` (one intent, several bots —
+  the claim path). `TenantBotEventBridge` forwards all four to host-declared
+  `ManagedBotEvents` beans with the same self-filtering and swallow-and-log it
+  already applies, so white-label hosts see intents too.
+- `TelegramBotModule#startPayload(String prefix, Predicate<JsonNode> handler)`
+  and `getStartPayloadRoutes()`, a second registry consulted by
+  `BotUpdateDispatcher` after it resolves `/start` and before the command
+  registry, longest matching prefix first. The prefix is limited to Telegram's
+  start-payload alphabet `[A-Za-z0-9_-]` (`IllegalArgumentException` otherwise)
+  and a second handler for the same prefix is an `IllegalStateException`. **The
+  handler returns whether it owned the update**: `false` falls through to the
+  normal `/start` handler, which is what keeps a login token that happens to
+  begin with `mb_` — Base64URL, so roughly one in `64³` — logging in normally
+  instead of being answered "link invalid" and dropped. The composed handler runs
+  on the update worker thread, never on the polling thread. `command("/start",
+  …)` is untouched and `DefaultAuthFlow` did not change.
+- `ManagedBotIntentFlow`, the claim handler: self-registering like
+  `DefaultAuthFlow`, auto-configured as a `@ConditionalOnBean(ManagedBotIntentStore.class)`
+  bean, replying with an inline URL button that opens `ManagedBotLink.build(...)`.
+  Overridable `onStart(JsonNode)` and `msg(FlowMessages.Key, String lang)`. It
+  mirrors `DefaultAuthFlow`'s private-chat rule exactly, so an intent can never be
+  claimed from a group.
+- Four `FlowMessages.Key` entries in uz/ru/en — `INTENT_PROMPT`,
+  `BTN_CREATE_BOT`, `INTENT_OTHER_OWNER`, `INTENT_ALREADY_DONE`. An expired or
+  cancelled link reuses the existing `INVALID_LINK`.
+- `telegram.managed-bots.intent-ttl` (default `30m`, the lifetime of an `OPEN`
+  intent — a `CLAIMED` one never expires, because its owner is proven and the
+  resolution screen needs it to survive) and
+  `telegram.managed-bots.intent-retention` (default `7d`). There is no scheduler:
+  expiry is evaluated lazily on read, and the retention purge runs from
+  `createIntent`, throttled to at most once a minute per JVM.
+- `ManagedBotLink.validateUsername(String)` is now public, so the same three
+  rules validate a suggestion at `createIntent` and at link build time.
+- **Host-account linking.** `BaseAuthSession` gained `getHostRef()` /
+  `setHostRef(String)` backed by a new nullable `host_ref VARCHAR(128)` column;
+  `AbstractSessionService.create(ipAddress, userAgent, hostRef)` is a new
+  overload (`IllegalArgumentException` beyond 128 characters) and the two-argument
+  `create` delegates to it with `null`; `AuthContext` gained a three-argument
+  constructor and `getHostRef()`, and `approve(...)` passes the stored value
+  through. Nothing in the library interprets it — no notion of "admin", no
+  account merging — it is opaque exactly like the intent's own `hostRef`.
+- `AbstractTelegramAuthController#hostRef(HttpServletRequest)`, a `protected`
+  override point returning `null` by default and consulted by the stock
+  `POST /session`. **`hostRef` is server-side only**: `CreateSessionRequest` has
+  no field for it and the endpoint never reads one from the body, because a
+  client that could set it could mint `link:admin:7` and attach its own Telegram
+  account to somebody else's.
+
+### Changed
+- **Managed-bot event publishing is now guarded per listener.** A
+  `ManagedBotEvents` callback that throws — `onCreated`, `onTokenRotated`,
+  `onTokenFetchFailed`, `onDecommissioned` or any of the four new intent hooks —
+  is logged at `WARN` and the next event still fires, instead of escaping
+  `ManagedBotService`. Previously such a throw aborted the rest of the work on
+  the update path — where the dispatcher caught and logged it — and reached the
+  host's own call site when the host had called `rotateToken`, `decommission` or
+  `fetchAndStore` directly. The guard is what makes "matching state is persisted,
+  then events are published" a promise rather than a hope, and it brings the
+  direct path in line with the white-label bridge, which has always guarded every
+  callback. Hosts that relied on a throw to abort anything must record the
+  failure themselves.
+- `AuthContext`'s javadoc no longer refers to an `AuthContextEnricher` type. No
+  such type exists anywhere in the repository and none ever did; the class now
+  describes what it actually carries.
+
+### Removed
+- **`messages_tgauth.properties`, `messages_tgauth_ru.properties` and
+  `messages_tgauth_en.properties`.** All three were dead: there is no
+  `MessageSource` anywhere in this library, no class ever read them, and Spring's
+  default basename is `messages`, not `messages_tgauth` — so a host that
+  "overrode" one changed nothing. Bot texts live in `FlowMessages`, a hard-coded
+  uz/ru/en table keyed by `FlowMessages.Key`, and are customised by overriding
+  `DefaultAuthFlow#msg(Key, String)` (or `ManagedBotIntentFlow#msg(Key, String)`).
+  Deleting them removes a documented path that never worked.
+
+### Migration
+- **Required, for every host, whether or not it uses linking:**
+
+  ```sql
+  ALTER TABLE auth_session ADD COLUMN host_ref VARCHAR(128);
+  ```
+
+  once per session table (`admin_tg_session`, `customer_tg_session`, …). The
+  column is new and nullable, so there is nothing to backfill, but
+  `BaseAuthSession` now maps the field and Hibernate schema validation fails the
+  application context at startup without it. This is the only change 0.5.0 forces
+  on an existing table.
+- **Optional, only if you adopt intents:** a new `managed_bot_intent` table,
+  created by your own migration like `managed_bot` before it. The PostgreSQL DDL
+  — including the `(owner_user_id, status)` and `(status, expires_at)` indexes and
+  the partial unique index on `bot_user_id`, which is what makes two concurrent
+  assignments of one bot resolve as `BOT_ALREADY_ASSIGNED` — is in the README's
+  Intents section.
+- No other action is needed. The new `ManagedBotEvents` methods are `default`, the
+  new `ManagedBotService` constructor and `create` / `AuthContext` signatures are
+  overloads, and every 0.4.0 signature still compiles.
+
+### Documentation
+- README: a new `### Intents` subsection under `## Managed bots` (the problem,
+  the store and DDL the host provides, the flow, the matching rules, the four
+  events, the `/start` routing and why its handler returns a `boolean`, and the
+  resolution screen **with its owner-scoped caveat** — `findUnassignedBots`
+  returns every unassigned bot of that Telegram user, including ones created for
+  something else entirely, so hosts must gate the screen behind their own
+  permission check); a new `## Linking a Telegram account to a host account`
+  section; `## Upgrading to 0.5.0`; the two new properties in the managed-bots
+  configuration table; install snippets at `0.5.0`; roadmap ticks.
+- `tasks/tech-doc/TECH_DOC.md` §9.2 no longer claims bot texts are
+  `messages_tgauth*.properties` resolved through Spring's `MessageSource`, and
+  its component map lists the managed-bots and intent types.
+
 ## [0.4.0] - 2026-09-10
 
 This release folds three previously separate efforts into 0.4.0: **managed
