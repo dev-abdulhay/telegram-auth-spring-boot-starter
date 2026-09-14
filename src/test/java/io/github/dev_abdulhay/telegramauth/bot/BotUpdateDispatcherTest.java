@@ -198,6 +198,23 @@ class BotUpdateDispatcherTest {
     }
 
     @Test
+    void theLongestMatchingPrefixWinsOverAShorterOverlappingOne() {
+        TelegramBotModule m = module();
+        AtomicReference<String> generalClaims = new AtomicReference<>();
+        AtomicReference<String> adminClaims = new AtomicReference<>();
+        m.startPayload("mb_", u -> { generalClaims.set(u.path("message").path("text").asText()); return true; });
+        m.startPayload("mb_admin_", u -> { adminClaims.set(u.path("message").path("text").asText()); return true; });
+        BotUpdateDispatcher d = new BotUpdateDispatcher(m);
+
+        String json = "{\"ok\":true,\"result\":[{\"update_id\":16,"
+                + "\"message\":{\"text\":\"/start mb_admin_xyz\",\"chat\":{\"id\":5}}}]}";
+        assertThat(d.dispatch(json)).isEqualTo(16);
+
+        assertThat(adminClaims.get()).isEqualTo("/start mb_admin_xyz");
+        assertThat(generalClaims.get()).isNull();
+    }
+
+    @Test
     void aClaimedPayloadWithNoStartCommandRegisteredIsSimplyDropped() {
         TelegramBotModule m = module();
         m.startPayload("mb_", u -> false);

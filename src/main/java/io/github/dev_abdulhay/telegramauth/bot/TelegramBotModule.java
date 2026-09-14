@@ -85,6 +85,8 @@ public final class TelegramBotModule {
      * would break a real login silently and unreproducibly.
      *
      * @param prefix limited to Telegram's start-payload alphabet {@code [A-Za-z0-9_-]}
+     * @throws IllegalArgumentException if {@code prefix} is blank or contains a character
+     *         outside {@code [A-Za-z0-9_-]}
      * @throws IllegalStateException if a different handler already holds this prefix
      */
     public void startPayload(String prefix, Predicate<JsonNode> handler) {
