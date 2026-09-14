@@ -144,4 +144,66 @@ class BotUpdateDispatcherTest {
         assertThat(maxId).isEqualTo(3);
         assertThat(fb.get()).isNotNull();
     }
+
+    @Test
+    void aClaimedStartPayloadNeverReachesTheStartCommand() {
+        TelegramBotModule m = module();
+        AtomicReference<JsonNode> login = new AtomicReference<>();
+        AtomicReference<String> claimed = new AtomicReference<>();
+        m.command("/start", login::set);
+        m.startPayload("mb_", u -> {
+            claimed.set(u.path("message").path("text").asText());
+            return true;
+        });
+        BotUpdateDispatcher d = new BotUpdateDispatcher(m);
+
+        String json = "{\"ok\":true,\"result\":[{\"update_id\":11,"
+                + "\"message\":{\"text\":\"/start mb_abc123\",\"chat\":{\"id\":5}}}]}";
+        assertThat(d.dispatch(json)).isEqualTo(11);
+        assertThat(claimed.get()).isEqualTo("/start mb_abc123");
+        assertThat(login.get()).isNull();
+    }
+
+    @Test
+    void anUnclaimedStartPayloadFallsThroughToTheStartCommand() {
+        TelegramBotModule m = module();
+        AtomicReference<JsonNode> login = new AtomicReference<>();
+        m.command("/start", login::set);
+        m.startPayload("mb_", u -> false);          // "not an intent I know"
+        BotUpdateDispatcher d = new BotUpdateDispatcher(m);
+
+        // A Base64URL login token really can start with mb_ — roughly one in 262144.
+        String json = "{\"ok\":true,\"result\":[{\"update_id\":12,"
+                + "\"message\":{\"text\":\"/start mb_aLoginTokenThatLooksLikeAnIntent\",\"chat\":{\"id\":5}}}]}";
+        assertThat(d.dispatch(json)).isEqualTo(12);
+        assertThat(login.get()).isNotNull();
+    }
+
+    @Test
+    void startPayloadRoutingSurvivesTheBotSuffixAndIgnoresAPlainStart() {
+        TelegramBotModule m = module();
+        AtomicReference<JsonNode> login = new AtomicReference<>();
+        AtomicReference<Integer> claims = new AtomicReference<>(0);
+        m.command("/start", login::set);
+        m.startPayload("mb_", u -> { claims.set(claims.get() + 1); return true; });
+        BotUpdateDispatcher d = new BotUpdateDispatcher(m);
+
+        d.dispatch("{\"ok\":true,\"result\":[{\"update_id\":13,"
+                + "\"message\":{\"text\":\"/start@demo_bot mb_abc\",\"chat\":{\"id\":5}}}]}");
+        d.dispatch("{\"ok\":true,\"result\":[{\"update_id\":14,"
+                + "\"message\":{\"text\":\"/start\",\"chat\":{\"id\":5}}}]}");
+
+        assertThat(claims.get()).isEqualTo(1);
+        assertThat(login.get()).isNotNull();        // the bare /start reached the command
+    }
+
+    @Test
+    void aClaimedPayloadWithNoStartCommandRegisteredIsSimplyDropped() {
+        TelegramBotModule m = module();
+        m.startPayload("mb_", u -> false);
+        BotUpdateDispatcher d = new BotUpdateDispatcher(m);
+
+        assertThat(d.dispatch("{\"ok\":true,\"result\":[{\"update_id\":15,"
+                + "\"message\":{\"text\":\"/start mb_abc\",\"chat\":{\"id\":5}}}]}")).isEqualTo(15);
+    }
 }
