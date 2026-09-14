@@ -1,7 +1,9 @@
 package io.github.dev_abdulhay.telegramauth.managedbots;
 
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -41,18 +43,32 @@ public class TelegramManagedBotsAutoConfiguration {
         return new ManagedBotEvents() { };
     }
 
+    /**
+     * The intent store is optional and host-supplied: an {@link ObjectProvider} keeps
+     * the whole feature opt-in without a second auto-configuration class.
+     */
     @Bean
     @ConditionalOnMissingBean
     public ManagedBotService managedBotService(TelegramBotModule module, ManagedBotTokenStore store,
                                                TokenEncryptor encryptor, ManagedBotEvents events,
-                                               TelegramManagedBotsProperties properties) {
+                                               TelegramManagedBotsProperties properties,
+                                               ObjectProvider<ManagedBotIntentStore> intentStore) {
         return new ManagedBotService(module, store, encryptor, events,
-                properties.getTokenFetchRetries(), properties.getTokenFetchBackoff());
+                properties.getTokenFetchRetries(), properties.getTokenFetchBackoff(),
+                intentStore.getIfAvailable(), properties.getIntentTtl(), properties.getIntentRetention());
     }
 
     @Bean
     @ConditionalOnMissingBean
     public ManagedBotUpdateHandler managedBotUpdateHandler(TelegramBotModule module, ManagedBotService service) {
         return new ManagedBotUpdateHandler(module, service);
+    }
+
+    /** Claims the {@code mb_} start-payload route. Absent when the host configures no intent store. */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnBean(ManagedBotIntentStore.class)
+    public ManagedBotIntentFlow managedBotIntentFlow(TelegramBotModule module, ManagedBotService service) {
+        return new ManagedBotIntentFlow(module, service);
     }
 }
