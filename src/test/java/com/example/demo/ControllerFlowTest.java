@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -53,6 +54,24 @@ class ControllerFlowTest {
         JsonNode wait = json.readTree(done.getResponse().getContentAsString());
         assertThat(wait.get("status").asText()).isEqualTo("APPROVED");
         assertThat(wait.get("payload").get("tgId").asLong()).isEqualTo(123L);
+    }
+
+    /**
+     * Spec §11.6: {@code POST /session} ignores any {@code hostRef}-looking field in
+     * the request body. {@code CreateSessionRequest} has no such field today, so this
+     * mainly guards against a future regression — someone innocently adding a
+     * {@code hostRef} property to the DTO and wiring it straight through, which would
+     * let a client point an approval at an account of its own choosing.
+     */
+    @Test
+    void hostRefLookingFieldInTheRequestBodyIsIgnored() throws Exception {
+        MvcResult createRes = mvc.perform(post("/api/demo-auth/session")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"hostRef\":\"attacker-supplied\"}"))
+                .andExpect(status().isOk()).andReturn();
+        String token = json.readTree(createRes.getResponse().getContentAsString()).get("token").asText();
+
+        assertThat(sessionService.findByRawToken(token).orElseThrow().getHostRef()).isNull();
     }
 
     @Test

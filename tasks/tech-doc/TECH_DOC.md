@@ -131,11 +131,48 @@ telegram-auth-spring-boot-starter/
 │       ├── CreateSessionResponse
 │       ├── SessionStatusResponse
 │       └── AuthApproveResult
+├── managedbots/                            — opt-in, since 0.4.0
+│   ├── ManagedBotService                  — link/intent creation, token custody, matching
+│   ├── ManagedBotEvents                   — lifecycle + intent hooks, all default no-ops
+│   ├── ManagedBot / ManagedBotLink        — stored bot, /newbot deep link builder
+│   ├── ManagedBotTokenStore               — InMemoryManagedBotStore | JpaManagedBotTokenStore
+│   ├── BaseManagedBot / BaseManagedBotRepository
+│   ├── TokenEncryptor / AesGcmTokenEncryptor
+│   ├── ManagedBotUpdateHandler            — the module's managed_bot slot
+│   │   ── intent types, since 0.5.0 (same package; on when a store bean exists)
+│   ├── ManagedBotIntent                   — record; START_PREFIX = "mb_"
+│   ├── ManagedBotIntentStatus             — OPEN|CLAIMED|COMPLETED|EXPIRED|CANCELLED
+│   ├── ManagedBotIntentLink               — intentId, url, expiresAt
+│   ├── IntentClaim / IntentClaimResult    — outcome of one /start mb_<id> tap
+│   ├── ManagedBotIntentException          — + Reason (host-branchable failures)
+│   ├── ManagedBotIntentStore              — InMemoryManagedBotIntentStore | JpaManagedBotIntentStore
+│   ├── BaseManagedBotIntent / BaseManagedBotIntentRepository
+│   └── ManagedBotIntentFlow               — /start mb_<id> claim handler
+├── whitelabel/                             — opt-in, since 0.4.0
+│   ├── TenantBotRegistry / TenantBotLifecycle / TenantBotFactory / RunningBot
+│   ├── TenantBotEventBridge               — bot lifecycle -> runtime lifecycle
+│   └── ManagedBotCustomizer
 ├── security/
 │   └── TokenGenerator                     — 32-byte SecureRandom, Base64URL
 └── db/changelog/
     └── telegram-auth-changelog.xml        — Liquibase master
 ```
+
+Since 0.5.0 the `/start` payload is also routable: `TelegramBotModule` keeps a
+second registry (`startPayload(prefix, Predicate<JsonNode>)` /
+`getStartPayloadRoutes()`) that `BotUpdateDispatcher` consults after resolving
+`/start` and before the command registry, longest prefix first. The predicate
+returns whether it owned the update, so an unrecognised payload falls through to
+the login handler — a Base64URL login token can begin with any three-character
+prefix. Sessions also carry an opaque `host_ref` (`BaseAuthSession`,
+`AbstractSessionService.create(ip, ua, hostRef)`, `AuthContext.getHostRef()`) set
+server-side only.
+
+> **Accuracy note.** The tree above is the original design-era layout and the
+> shipped library has drifted from it: there is no `MessageProvider`, no
+> `RedisEventBusConfig` and no Liquibase changelog, and the web/service/entity
+> classes are the abstract `Abstract*`/`Base*` types a host subclasses. The
+> `managedbots/` and `whitelabel/` blocks are as built.
 
 ### 3.2 Request path by transport
 
@@ -609,7 +646,21 @@ registered    new
 | `error.expired`              | "So'rov muddati tugagan."                                   |
 | `error.rate_limited`         | "Juda ko'p urinish. Keyinroq qayta urinib ko'ring."         |
 
-`ru` and `en` variants live in `messages_tgauth_ru.properties` / `_en.properties`. Host app can override by providing same-named files in its own classpath (standard Spring `MessageSource` resolution).
+> **Correction (0.5.0).** This section described a `MessageSource`-based scheme
+> that was never built. There is **no `MessageSource` anywhere in this library**,
+> and the `messages_tgauth.properties` / `_ru` / `_en` files that used to sit in
+> `src/main/resources` were dead — no class read them, and Spring's default
+> basename is `messages`, not `messages_tgauth`, so a host that "overrode" one
+> changed nothing. They were deleted in 0.5.0.
+>
+> Bot texts live in `flow/FlowMessages`: a hard-coded uz/ru/en table keyed by
+> `FlowMessages.Key`, read through `FlowMessages.text(key, lang)` with the
+> language resolved from the update's `language_code` by
+> `FlowMessages.resolveLang(...)`. A host customises wording by overriding
+> `DefaultAuthFlow#msg(FlowMessages.Key, String lang)` — and, since 0.5.0,
+> `ManagedBotIntentFlow#msg(FlowMessages.Key, String lang)` for the intent texts.
+> The key names in the table above are the original design's; the shipped keys
+> are the `FlowMessages.Key` enum constants.
 
 **`approve.prompt` — `{location}` placeholder:**
 - The `{location}` placeholder is optional enrichment for the approve prompt.
@@ -666,6 +717,8 @@ public interface MessageProvider {
 
 Default implementation delegates to Spring `MessageSource`. Override to pull messages from a DB, CMS, etc.
 
+> **Not implemented.** No `MessageProvider` type exists in the library, and there is no `MessageSource` to delegate to — see the correction in §9.2. The shipped extension point is overriding `DefaultAuthFlow#msg(FlowMessages.Key, String)`.
+
 ### 10.4 `AuthContextEnricher` (optional)
 
 ```java
@@ -675,6 +728,8 @@ public interface AuthContextEnricher {
 ```
 
 Lets the host add fields (geo-IP, device fingerprint, etc.) to the `AuthContext` passed into `onApprove`.
+
+> **Not implemented.** No `AuthContextEnricher` type exists in the library; a stale reference to it was removed from `AuthContext`'s javadoc in 0.5.0. What `AuthContext` actually offers is `setAttribute(String, Object)` / `getAttributes()` for free-form decoration, and — since 0.5.0 — `getHostRef()`, the opaque string the host attached at session creation via `AbstractSessionService.create(ip, ua, hostRef)` or by overriding `AbstractTelegramAuthController#hostRef(HttpServletRequest)`. It is deliberately never read from the request body.
 
 ---
 

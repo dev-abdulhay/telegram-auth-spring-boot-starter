@@ -5,16 +5,19 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Parses a Telegram {@code getUpdates} response and routes each update through
  * its module's handlers. Routing order: {@code managed_bot} handler (a
  * top-level {@code Update} field, checked before anything nested in
- * {@code message}), then the {@code callback_query} handler, then the command
- * registry, then the {@code contact} handler, then the text handler, then the
- * module fallback. Handlers receive the full update {@link JsonNode}.
+ * {@code message}), then the {@code callback_query} handler, then — for
+ * {@code /start} only — the start-payload routes, then the command registry,
+ * then the {@code contact} handler, then the text handler, then the module
+ * fallback. Handlers receive the full update {@link JsonNode}.
  *
  * <p>An unregistered {@code /command} reaches the <em>text</em> handler, not the
  * fallback: once the registry misses there is nothing left to distinguish it
@@ -23,6 +26,7 @@ import java.util.function.Consumer;
 public class BotUpdateDispatcher {
 
     private static final Logger log = LoggerFactory.getLogger(BotUpdateDispatcher.class);
+    private static final String START = "/start";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private final TelegramBotModule module;
@@ -89,6 +93,15 @@ public class BotUpdateDispatcher {
         if (text.startsWith("/")) {
             String command = parseCommand(text);
             Consumer<JsonNode> handler = module.getCommands().get(command);
+            Predicate<JsonNode> route = START.equals(command) ? startRouteFor(text) : null;
+            if (route != null) {
+                // One composed handler, one executor hop: the predicate does the store
+                // lookup on the worker thread, and the fall-through decision is made
+                // where its answer is known.
+                Consumer<JsonNode> next = handler;
+                invoke(u -> { if (!route.test(u) && next != null) next.accept(u); }, update);
+                return;
+            }
             if (handler != null) {
                 invoke(handler, update);
                 return;
@@ -113,6 +126,23 @@ public class BotUpdateDispatcher {
         String token = (space >= 0) ? text.substring(0, space) : text;
         int at = token.indexOf('@');
         return (at >= 0) ? token.substring(0, at) : token;
+    }
+
+    /** @return the handler whose prefix matches this {@code /start} payload — longest wins — or {@code null} */
+    private Predicate<JsonNode> startRouteFor(String text) {
+        int space = text.indexOf(' ');
+        if (space < 0) return null;
+        String payload = text.substring(space + 1).trim();
+        if (payload.isEmpty()) return null;
+        Predicate<JsonNode> best = null;
+        int bestLength = -1;
+        for (Map.Entry<String, Predicate<JsonNode>> e : module.getStartPayloadRoutes().entrySet()) {
+            if (payload.startsWith(e.getKey()) && e.getKey().length() > bestLength) {
+                best = e.getValue();
+                bestLength = e.getKey().length();
+            }
+        }
+        return best;
     }
 
     private void invoke(Consumer<JsonNode> handler, JsonNode update) {

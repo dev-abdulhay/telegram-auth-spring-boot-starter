@@ -3,10 +3,11 @@ package io.github.dev_abdulhay.telegramauth.flow;
 import java.util.Map;
 
 /**
- * Built-in bot texts for {@link DefaultAuthFlow} in three languages
- * ({@code uz} default, {@code ru}, {@code en}), resolved from the Telegram
- * {@code from.language_code}. Hosts customise wording by overriding
- * {@code DefaultAuthFlow#msg(Key, String)}.
+ * Built-in bot texts for {@link DefaultAuthFlow} and
+ * {@code io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotIntentFlow} in
+ * three languages ({@code uz} default, {@code ru}, {@code en}), resolved from the
+ * Telegram {@code from.language_code}. Hosts customise wording by overriding
+ * each flow's own {@code msg(Key, String)}.
  */
 public final class FlowMessages {
 
@@ -37,7 +38,13 @@ public final class FlowMessages {
         BTN_REJECT,
         APPROVED,
         REJECTED,
-        SESSION_EXPIRED
+        SESSION_EXPIRED,
+        /** Shown when an intent link is claimed and its bot still has to be created. */
+        INTENT_PROMPT,
+        /** Label of the inline URL button that opens Telegram's bot-creation dialog. */
+        BTN_CREATE_BOT,
+        INTENT_OTHER_OWNER,
+        INTENT_ALREADY_DONE
     }
 
     private static final Map<Key, Map<String, String>> TEXTS = Map.ofEntries(
@@ -131,7 +138,23 @@ public final class FlowMessages {
             Map.entry(Key.SESSION_EXPIRED, Map.of(
                     "uz", "Sessiya muddati tugagan.",
                     "ru", "Сессия истекла.",
-                    "en", "The session has expired.")));
+                    "en", "The session has expired.")),
+            Map.entry(Key.INTENT_PROMPT, Map.of(
+                    "uz", "Botingizni yaratish uchun quyidagi tugmani bosing. Telegram'da bot nomini o'zgartirishingiz mumkin.",
+                    "ru", "Нажмите кнопку ниже, чтобы создать бота. В Telegram имя бота можно изменить.",
+                    "en", "Tap the button below to create your bot. You can change the bot's username in Telegram.")),
+            Map.entry(Key.BTN_CREATE_BOT, Map.of(
+                    "uz", "Bot yaratish",
+                    "ru", "Создать бота",
+                    "en", "Create bot")),
+            Map.entry(Key.INTENT_OTHER_OWNER, Map.of(
+                    "uz", "Bu havola boshqa foydalanuvchiga tegishli.",
+                    "ru", "Эта ссылка принадлежит другому пользователю.",
+                    "en", "This link belongs to a different user.")),
+            Map.entry(Key.INTENT_ALREADY_DONE, Map.of(
+                    "uz", "Bu havola bo'yicha bot allaqachon yaratilgan.",
+                    "ru", "Бот по этой ссылке уже создан.",
+                    "en", "The bot for this link has already been created.")));
 
     private FlowMessages() {
     }
