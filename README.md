@@ -25,6 +25,8 @@ managed bots need it; white-label needs both.
 | [Number matching](#number-matching-codeconfirmation) | The browser shows a two-digit code the user must pick in the bot, so tapping a link is no longer enough to complete a login | on by default (`codeConfirmation=BUTTON`) |
 | [Multiple user types](#multiple-user-types) | N independent bots, tables and REST prefixes from one dependency | declare one module per type |
 | [Managed bots](#managed-bots) | Your bot creates bots on your users' behalf and keeps custody of their tokens, encrypted — with rotation, access settings and decommission | `telegram.managed-bots.enabled=true` |
+| [Managed-bot intents](#intents) | Matches a created bot back to the request that asked for it by the creator's Telegram id, so an edited username no longer orphans the bot | declare a `ManagedBotIntentStore` bean |
+| [Host-account linking](#linking-a-telegram-account-to-a-host-account) | An opaque `hostRef` set server-side at session creation reaches your approve handler, so you can tell a login from "admin 7 is linking their Telegram" | comes with the flow |
 | [White-label tenant bots](#white-label-tenant-bots) | Every managed bot gets its own polling runtime and session service, so each tenant authenticates through its own branded bot | `telegram.white-label.enabled=true` |
 
 Every property is listed in the [configuration reference](#configuration-reference).
@@ -61,14 +63,14 @@ for free; override a method to change the behaviour.
 <dependency>
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.4.0</version>
+    <version>0.5.0</version>
 </dependency>
 ```
 
 **Gradle (Kotlin DSL):**
 
 ```kotlin
-implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.4.0")
+implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.5.0")
 ```
 
 Then enable the starter:
@@ -80,6 +82,10 @@ telegram:
     cleanup-cron: "0 */5 * * * *"  # optional — expired-session sweep schedule
 ```
 
+> **Upgrading from 0.4.x?** 0.5.0 adds one column to the session table and every
+> host must apply it, whether or not it uses the new features. See
+> [Upgrading to 0.5.0](#upgrading-to-050).
+>
 > **Upgrading from 0.3.x?** `codeConfirmation` now defaults to `BUTTON`, so every
 > login gains a number-matching step. See [Upgrading to 0.4.0](#upgrading-to-040).
 
@@ -539,6 +545,52 @@ plus optional `bot(…)` / `eventBus(…)` overrides.
 > contact step all the way to the final number, rather than to ✅. Override the
 > `on*` methods with a shared store if a mid-flow handover has to survive intact.
 
+## Upgrading to 0.5.0
+
+Nothing in 0.5.0 breaks a 0.4.0 public signature. There is exactly **one forced
+migration**, and it is not optional:
+
+1. **Add `host_ref` to every auth-session table.**
+
+   ```sql
+   ALTER TABLE auth_session ADD COLUMN host_ref VARCHAR(128);
+   ```
+
+   (Substitute your own table name, once per module — `admin_tg_session`,
+   `customer_tg_session`, and so on.) The column is new and nullable, so there is
+   nothing to backfill, but **every host must apply it whether or not it uses
+   [linking](#linking-a-telegram-account-to-a-host-account)**: `BaseAuthSession`
+   now maps the field, so Hibernate schema validation fails the application
+   context at startup without it. This is the only change 0.5.0 forces on an
+   existing table.
+
+Everything else is additive, and none of it needs a decision on upgrade day:
+
+2. **Managed-bot intents are opt-in.** No `ManagedBotIntentStore` bean means no
+   `/start mb_` route, no matching, no behaviour change — `createLink` works
+   exactly as it did. When you do want them, the new `managed_bot_intent` table
+   is a **new** table, created by your own migration; the DDL is in
+   [Intents](#intents).
+3. **`ManagedBotEvents` gained four `default` methods** — `onIntentClaimed`,
+   `onIntentMatched`, `onIntentUnmatched`, `onIntentAmbiguous`. Existing
+   implementations compile and behave unchanged; no action needed.
+4. **Managed-bot events are now published through a per-listener guard.** This is
+   a real behaviour change, and the one to read twice if you have a
+   `ManagedBotEvents` bean: an exception thrown by your `onCreated`,
+   `onTokenRotated`, `onTokenFetchFailed` or `onDecommissioned` used to escape
+   `ManagedBotService` — aborting the rest of the work on the update path, and
+   reaching your own call site when you had called `rotateToken`,
+   `decommission` or `fetchAndStore` yourself. It is now caught, logged at
+   `WARN`, and the next event still fires. If you were relying on a throw to
+   abort anything, you no longer can — record the failure yourself. (Under the
+   white-label runtime the bridge already swallowed them, so nothing changes
+   there.)
+5. **`AbstractSessionService.create(ip, ua)` and the two-argument `AuthContext`
+   constructor are kept**; the `hostRef` variants are overloads. `POST /session`
+   still ignores anything `hostRef`-shaped in the request body, on purpose.
+6. **`TelegramBotModule` gained `startPayload` / `getStartPayloadRoutes`.**
+   `command("/start", …)` is untouched, and `DefaultAuthFlow` did not change.
+
 ## Upgrading to 0.4.0
 
 Breaking, in rough order of how likely it is to affect you:
@@ -606,6 +658,8 @@ before any code here runs:
 | `telegram.managed-bots.encryption-key` | *(required)* | Base64-encoded 32-byte AES key used to encrypt tokens at rest. Required when the feature is on, unless you supply your own `TokenEncryptor` bean. |
 | `telegram.managed-bots.token-fetch-retries` | `3` | Attempts for `getManagedBotToken` before giving up on a `managed_bot` update. |
 | `telegram.managed-bots.token-fetch-backoff` | `1s` | Delay before the first retry, doubling on each further attempt. |
+| `telegram.managed-bots.intent-ttl` | `30m` | How long an `OPEN` [intent](#intents) stays claimable. A `CLAIMED` intent never expires — its owner is proven and the resolution screen needs it to survive. |
+| `telegram.managed-bots.intent-retention` | `7d` | How long closed intents (expired, cancelled) are kept before the purge deletes them. |
 
 ```yaml
 telegram:
@@ -614,6 +668,8 @@ telegram:
     encryption-key: "BASE64_ENCODED_32_BYTE_KEY"
     token-fetch-retries: 3
     token-fetch-backoff: 1s
+    intent-ttl: 30m          # only used when an intent store bean is declared
+    intent-retention: 7d
 ```
 
 ### Minimal usage
@@ -680,6 +736,369 @@ ManagedBotEvents managedBotEvents(ManagedBotService managedBotService) {
     };
 }
 ```
+
+### Intents
+
+`createLink` hands out a bot-creation deep link that carries **nothing of yours**.
+The `managed_bot` update that comes back says who created the bot
+(`ownerUserId`) and which bot it is (`botUserId`) — not which of your requests it
+answers. The only field you could match on without extra state is the username,
+and the username is a *suggestion*: Telegram lets the user edit it in the
+confirmation dialog. When they do, the correlation breaks silently and the bot
+arrives with nothing to attach it to.
+
+An **intent** is that missing state. You create one before handing out the link;
+the user opens the link on the **manager** bot first, which proves their Telegram
+id; the bot they create afterwards is matched back to the intent by **that id**,
+which an edited username cannot break. When matching cannot decide on its own,
+the library gives you what a human needs to decide instead — see
+[the resolution screen](#the-resolution-screen-and-its-owner-scoped-caveat).
+
+Intents are opt-in on top of managed bots and purely additive: declare a
+`ManagedBotIntentStore` bean and the feature turns on. Without that bean nothing
+changes — no `/start` route is registered, no matching runs, `createIntent`
+throws `IllegalStateException`, and `createLink` behaves exactly as it did in
+0.4.0.
+
+#### The store you provide
+
+Same division of labour as `ManagedBotTokenStore`: the library owns the contract,
+you own the table.
+
+```java
+public interface ManagedBotIntentStore {
+    void save(ManagedBotIntent intent);                        // upsert by id
+    Optional<ManagedBotIntent> findById(String id);
+    Optional<ManagedBotIntent> findByBotUserId(long botUserId);
+    List<ManagedBotIntent> findClaimedByOwner(long ownerUserId);
+    int deleteClosedBefore(OffsetDateTime cutoff);
+}
+```
+
+**Option A — JPA**, subclassing `BaseManagedBotIntent` and
+`BaseManagedBotIntentRepository`:
+
+```java
+@Entity
+@Table(name = "managed_bot_intent",
+        indexes = {
+            @Index(name = "idx_managed_bot_intent_owner_status", columnList = "owner_user_id,status"),
+            @Index(name = "idx_managed_bot_intent_status_expires", columnList = "status,expires_at")
+        })
+public class TenantIntent extends BaseManagedBotIntent {}
+
+public interface TenantIntentRepository extends BaseManagedBotIntentRepository<TenantIntent> {}
+
+@Bean
+ManagedBotIntentStore managedBotIntentStore(TenantIntentRepository repo) {
+    return new JpaManagedBotIntentStore<>(repo, TenantIntent::new);
+}
+```
+
+**Option B — in-memory** (tests, or hosts that do not use JPA):
+
+```java
+@Bean
+ManagedBotIntentStore managedBotIntentStore() {
+    return new InMemoryManagedBotIntentStore();
+}
+```
+
+The primary key is **assigned, not generated**: `ManagedBotService` mints the id
+(22 Base64URL characters), it travels inside a Telegram `/start` payload, and it
+is looked up by that value — a surrogate key would buy nothing. That is why
+`BaseManagedBotIntent` carries a bare `@Id`, and why the factory you pass to
+`JpaManagedBotIntentStore` must return a **blank, unsaved** entity.
+
+The table, like `managed_bot`, is yours to create (PostgreSQL):
+
+```sql
+CREATE TABLE managed_bot_intent (
+    id                 VARCHAR(32)  PRIMARY KEY,
+    suggested_username VARCHAR(50),
+    suggested_name     VARCHAR(100),
+    host_ref           VARCHAR(128),
+    owner_user_id      BIGINT,
+    status             VARCHAR(16)  NOT NULL,
+    bot_user_id        BIGINT,
+    created_at         TIMESTAMPTZ  NOT NULL,
+    claimed_at         TIMESTAMPTZ,
+    completed_at       TIMESTAMPTZ,
+    expires_at         TIMESTAMPTZ  NOT NULL
+);
+CREATE INDEX idx_managed_bot_intent_owner_status ON managed_bot_intent (owner_user_id, status);
+CREATE INDEX idx_managed_bot_intent_status_expires ON managed_bot_intent (status, expires_at);
+CREATE UNIQUE INDEX uq_managed_bot_intent_bot_user_id ON managed_bot_intent (bot_user_id) WHERE bot_user_id IS NOT NULL;
+```
+
+All three indexes earn their keep: `(owner_user_id, status)` is the matching
+lookup (`findClaimedByOwner`), `(status, expires_at)` is the retention purge, and
+the unique index on `bot_user_id` is what makes two concurrent assignments of one
+bot resolve as `BOT_ALREADY_ASSIGNED` instead of both succeeding. The partial form
+keeps the many unassigned rows out of that index; a plain `UNIQUE` works too on
+any database that allows repeated `NULL`s.
+
+#### The flow
+
+1. **You create the intent.** `createIntent(...)` returns a
+   `ManagedBotIntentLink` — the id, the URL
+   `https://t.me/<manager>?start=mb_<intentId>`, and when it expires. Store the
+   id against whatever row in your own schema this bot is for.
+2. **You hand the URL to the user.** Not the `/newbot` link: this one goes to
+   your **manager** bot.
+3. **The user opens it.** `ManagedBotIntentFlow` claims the intent for that
+   Telegram id, fires `onIntentClaimed(intent)`, and replies with one inline
+   button that opens the real bot-creation link.
+4. **The user creates the bot,** editing the username if they feel like it.
+5. **Telegram sends the `managed_bot` update.** The token is fetched and stored
+   as it always was, `onCreated(bot)` fires, and then the bot is matched back to
+   the intent by its creator's id — `onIntentMatched(bot, intent)`.
+
+Creating one:
+
+```java
+ManagedBotIntentLink link = managedBotService.createIntent(
+        "mycompany_sales_bot",     // suggested username, nullable
+        "My Company Sales",        // suggested name, nullable
+        "bot:42");                 // hostRef — opaque to the library
+
+link.intentId();    // store it against your own row
+link.url();         // https://t.me/<manager>?start=mb_<intentId> — hand this to the user
+link.expiresAt();   // createdAt + telegram.managed-bots.intent-ttl
+```
+
+- The suggested username is validated **eagerly**, with exactly the rules
+  `createLink` uses, so an `IllegalArgumentException` lands in your request thread
+  rather than on the bot's update worker when the claim reply builds the same
+  link. `null` or blank means "no suggestion", as it does for `createLink`.
+- `hostRef` is opaque and at most 128 characters; longer is an
+  `IllegalArgumentException`. The library never reads it — it comes back to you
+  on every intent event, and it is the same idea as the session `hostRef` in
+  [Linking a Telegram account to a host account](#linking-a-telegram-account-to-a-host-account).
+- No bean of type `ManagedBotIntentStore` in the context → `IllegalStateException`.
+
+The rest of the lifecycle:
+
+```java
+Optional<ManagedBotIntent> intent = managedBotService.findIntent(intentId);
+managedBotService.cancelIntent(intentId);   // OPEN|CLAIMED -> CANCELLED
+```
+
+```
+OPEN ──/start (first user)──▶ CLAIMED ──auto match / assignToIntent──▶ COMPLETED
+  │                              │
+  ├──now > expiresAt──▶ EXPIRED  └──cancelIntent──▶ CANCELLED
+  └──cancelIntent──▶ CANCELLED
+```
+
+**Expiry is lazy.** There is no scheduler. `findIntent` (and the claim path)
+reports an overdue `OPEN` row as `EXPIRED` and persists that when it sees it, so
+an intent nobody ever reads stays `OPEN` in your table until the purge reaps it —
+which is why the purge predicate is written against `expires_at` and not against
+the status alone. The purge itself runs from `createIntent`, at most once a
+minute per JVM, deleting every row that is neither `CLAIMED` nor `COMPLETED` and
+whose `expires_at` is older than `intent-retention`. `COMPLETED` rows are kept
+forever: they *are* the bot→intent link that `findUnassignedBots` reads.
+`cancelIntent` throws `ManagedBotIntentException` with `INTENT_NOT_FOUND` or
+`INTENT_CLOSED`.
+
+#### How a bot is matched to an intent
+
+Matching runs on creation (from `handleUpdate` and from a `fetchAndStore`
+recovery) — never on a token rotation, never for an echo of a change the library
+itself made — and once more on the first claim, because the bot may already exist
+by the time the link is opened.
+
+On creation, for the bot's `ownerUserId`:
+
+1. Already linked to an intent (`findByBotUserId` present)? Do nothing — this is
+   a re-delivered update.
+2. Candidates are that owner's `CLAIMED` intents, **filtered to
+   `bot.createdAt() >= intent.createdAt()`**. An intent cannot predate the bot it
+   asked for, and without the filter a bot created for something else entirely
+   would become a silent auto-match candidate.
+3. No candidates → do nothing, no event. This is the intent-less 0.4.0 path.
+4. Exactly one candidate whose `suggestedUsername` equals the bot's username
+   (case-insensitive, null-safe on both sides) → match it.
+5. Otherwise exactly one candidate at all → match it.
+6. Otherwise → `onIntentUnmatched(bot, candidates)`, and nothing is linked.
+
+On the first claim the same reasoning runs mirrored — one intent against that
+owner's unassigned bots — and the undecidable case is `onIntentAmbiguous(intent,
+candidates)`.
+
+A match sets `status = COMPLETED`, `botUserId` and `completedAt`, and **persists
+that before any event is published**, so a listener that throws cannot leave a
+half-linked intent behind.
+
+#### Events
+
+Four more no-op defaults on `ManagedBotEvents`:
+
+```java
+default void onIntentClaimed(ManagedBotIntent intent) { }
+default void onIntentMatched(ManagedBot bot, ManagedBotIntent intent) { }
+default void onIntentUnmatched(ManagedBot bot, List<ManagedBotIntent> candidates) { }    // one bot, several intents
+default void onIntentAmbiguous(ManagedBotIntent intent, List<ManagedBot> candidates) { } // one intent, several bots
+```
+
+- On creation: `onCreated(bot)` first, then exactly one of `onIntentMatched` /
+  `onIntentUnmatched` / nothing.
+- On claim: `onIntentClaimed(intent)` first, then exactly one of
+  `onIntentMatched` / `onIntentAmbiguous` / nothing.
+- Every managed-bot callback is now published through a per-listener guard: a
+  handler that throws is logged at `WARN` and the next event still fires. In
+  0.4.0 an exception from `onCreated` escaped `ManagedBotService` and took the
+  rest of the work with it; it no longer does. This matches what the white-label
+  bridge has always done.
+- `TenantBotEventBridge` forwards all four to your own `ManagedBotEvents` bean,
+  with the same self-filtering and swallow-and-log it already applies to the
+  other callbacks — so intents work the same whether or not the white-label
+  runtime is on.
+
+```java
+@Bean
+ManagedBotEvents managedBotEvents(BotConnectionService connections) {
+    return new ManagedBotEvents() {
+        @Override
+        public void onIntentClaimed(ManagedBotIntent intent) {
+            connections.markConfirmedByUser(intent.hostRef(), intent.ownerUserId());
+        }
+        @Override
+        public void onIntentMatched(ManagedBot bot, ManagedBotIntent intent) {
+            connections.connect(intent.hostRef(), bot.botUserId());   // no username guessing
+        }
+        @Override
+        public void onIntentUnmatched(ManagedBot bot, List<ManagedBotIntent> candidates) {
+            candidates.forEach(i -> connections.needsAssignment(i.hostRef()));
+        }
+        @Override
+        public void onIntentAmbiguous(ManagedBotIntent intent, List<ManagedBot> candidates) {
+            connections.needsAssignment(intent.hostRef());
+        }
+    };
+}
+```
+
+#### `/start mb_…` routing, and why the handler returns a `boolean`
+
+`ManagedBotIntentFlow` claims the intent and replies with the bot-creation
+button. It is auto-configured for you as soon as a `ManagedBotIntentStore` bean
+exists (`@ConditionalOnBean`), and it self-registers into the manager bot's
+module exactly the way `DefaultAuthFlow` registers `/start` — constructing it is
+all the wiring it needs. Override `msg(FlowMessages.Key, String lang)` to change
+the wording; the four new keys are `INTENT_PROMPT`, `BTN_CREATE_BOT`,
+`INTENT_OTHER_OWNER` and `INTENT_ALREADY_DONE`, and an expired or cancelled link
+reuses the existing `INVALID_LINK`.
+
+It does **not** take the `/start` command slot. Routing is a new, separate
+registry on the module, consulted by `BotUpdateDispatcher` after it has resolved
+`/start` and before the command registry:
+
+```java
+public void startPayload(String prefix, Predicate<JsonNode> handler);   // duplicate prefix -> IllegalStateException
+public Map<String, Predicate<JsonNode>> getStartPayloadRoutes();        // unmodifiable, like getCommands()
+```
+
+The prefix must be non-blank and limited to Telegram's start-payload alphabet
+`[A-Za-z0-9_-]`; anything else is an `IllegalArgumentException`. The longest
+matching prefix wins. The route runs on the update worker thread, never on the
+polling thread, so the store lookup it performs cannot stall polling.
+
+**The handler returns whether it owned the update, and `false` sends the update
+on to the normal `/start` handler.** That fall-through is not a nicety. Login
+tokens are Base64URL, so a token beginning with `mb_` is not impossible — it is
+roughly one in `64³ ≈ 262 144`. A fire-and-forget consumer would answer that user
+"link invalid" and never log them in, silently and unreproducibly. Because the
+intent store simply does not know the id, `claimIntent` returns `UNKNOWN`, the
+flow returns `false`, and the login proceeds exactly as it always has.
+
+The same design removes a registration-order hazard: `DefaultAuthFlow` is not
+modified and does not have to be constructed first. If a module registers no
+`/start` handler at all, an unclaimed payload is silently dropped — the update is
+still consumed, but `BotUpdateDispatcher`'s composed handler simply does nothing
+when the command handler is `null`; there is no log line. That is also a routing
+change from 0.4.0, not "as before": a `/start <payload>` with no `/start` command
+registered used to fall through to the **text** handler, whereas a matched
+start-payload route now consumes the update at the dispatcher and returns, so the
+text handler is never reached for it.
+
+What the user sees for each outcome:
+
+| `/start mb_<id>` | Reply |
+|---|---|
+| id the store does not know | nothing from this flow — falls through to the login handler |
+| expired or cancelled | `INVALID_LINK` |
+| claimed or completed by a **different** Telegram user | `INTENT_OTHER_OWNER`; the first claimer keeps it |
+| already completed, same user | `INTENT_ALREADY_DONE` |
+| first claim, or the same user tapping again | `INTENT_PROMPT` plus one inline URL button, `BTN_CREATE_BOT` |
+| not a private chat | nothing; the update is consumed and dropped |
+
+The private-chat rule mirrors `DefaultAuthFlow`'s exactly: an intent must never
+be claimable from a group, where anyone could tap a forwarded link. One more case
+hides behind the prompt row: if the claim itself found a waiting bot and
+completed the intent on the spot, asking for a bot now would be absurd, so the
+reply is `INTENT_ALREADY_DONE` instead of the prompt.
+
+#### The resolution screen, and its owner-scoped caveat
+
+`onIntentUnmatched` and `onIntentAmbiguous` mean a human has to choose. Three
+methods back the screen you build for that:
+
+```java
+List<ManagedBot> bots = managedBotService.findUnassignedBots(intentId);
+ManagedBotIntent done = managedBotService.assignToIntent(intentId, botUserId);
+managedBotService.decommissionUnassigned(botUserId);
+```
+
+- `findUnassignedBots` returns that intent's owner's managed bots that no intent
+  claims. It is **not** filtered by age — a bot created before intents existed is
+  precisely the case this screen has to repair. It returns an empty list when the
+  intent is unknown or not `CLAIMED`. The `ManagedBot` records it returns carry
+  the token only in its encrypted form, masked in `toString` as everywhere else —
+  do not put it on the screen.
+- `assignToIntent` links the bot by hand and runs the normal `onIntentMatched`
+  path, returning the saved intent. Call it outside your own `@Transactional`
+  method when you can: the store flushes immediately so the unique `bot_user_id`
+  index can arbitrate a concurrent assignment, and that flush failure would
+  otherwise poison the caller's own transaction.
+- `decommissionUnassigned` is `decommission` with a guard: it refuses a bot that
+  some intent already claims, so a misclick cannot disconnect a live tenant.
+  Everything else about it is `decommission` — the token is revoked, the row is
+  forgotten, and **the bot keeps existing on Telegram**, because the Bot API has
+  no way to delete it. Only its owner can, in BotFather. Say so in your
+  confirmation dialog.
+
+Every failure is a `ManagedBotIntentException` carrying a `Reason` you can branch
+on, never a bare `RuntimeException`:
+
+| `Reason` | When |
+|---|---|
+| `INTENT_NOT_FOUND` | no such intent |
+| `INTENT_NOT_CLAIMED` | the intent is `OPEN`, `COMPLETED`, `EXPIRED` or `CANCELLED` |
+| `INTENT_CLOSED` | `cancelIntent` on an intent that is already completed, cancelled or expired |
+| `BOT_NOT_FOUND` | the token store does not know that bot |
+| `OWNER_MISMATCH` | the bot was created by a different Telegram user than the one who claimed the intent |
+| `BOT_ALREADY_ASSIGNED` | the bot already belongs to an intent — including a concurrent `assignToIntent` losing the race on the unique `bot_user_id` index, and `decommissionUnassigned` on an assigned bot |
+
+A genuine store failure is **not** dressed up as one of these: if the save fails
+and the store still reports the bot as unassigned, the original exception is
+logged and rethrown unchanged.
+
+> **The list is owner-scoped, not host-scoped.** `findUnassignedBots` returns
+> every unassigned managed bot belonging to that **Telegram user** — including
+> bots they created for another organisation, another product of yours, or by
+> hand for something unrelated. The library cannot tell them apart: it has no
+> notion of organisation or tenant, by design. Two consequences, and neither is
+> optional:
+>
+> - **Gate this screen behind your own permission check.** Reach it only through
+>   an intent your requesting account owns, and only for a user allowed to manage
+>   that account's bots.
+> - **Word the removal confirmation accordingly.** "Remove from platform" may be
+>   pointed at a bot that has nothing to do with the request in front of the
+>   user, so name the bot, say that it will be disconnected from your platform,
+>   and say that the bot itself survives until its owner deletes it in BotFather.
 
 ### Deleting a managed bot
 
@@ -785,6 +1204,161 @@ already has. Telegram caps the list at 10 users and ignores it entirely when
   `fetchAndStore`. Lower the budget by building the bot yourself:
   `TelegramBotModule.builder(token, username).bot(new TelegramBot(httpClient,
   token, "https://api.telegram.org", Duration.ofSeconds(5)))`.
+
+## Linking a Telegram account to a host account
+
+Your platform already has accounts of its own — admins, staff, operators. Sooner
+or later one of them wants to sign in with Telegram, or to create bots through
+the manager bot, and both need the same missing piece: a way to bind **one
+Telegram identity to one of your accounts**.
+
+Until 0.5.0 the approve handler could not help. `onApprove(TelegramUserInfo,
+AuthContext)` gets the confirmed Telegram identity and the request's IP and user
+agent — and nothing at all that says *which* session this is or *why* it was
+created. "Someone is logging in" and "admin 7 is linking their Telegram" arrive
+looking identical.
+
+One opaque string fixes it.
+
+### The `hostRef` contract
+
+```java
+// AbstractSessionService
+public CreatedSession create(String ipAddress, String userAgent);                  // unchanged — delegates with null
+public CreatedSession create(String ipAddress, String userAgent, String hostRef);  // new
+
+// AuthContext
+public AuthContext(String ipAddress, String userAgent);                  // kept
+public AuthContext(String ipAddress, String userAgent, String hostRef);  // new
+public String getHostRef();
+```
+
+The value is stored on the session row (`host_ref VARCHAR(128)` on
+`BaseAuthSession`) and handed back to your approve handler on that same session,
+after the Telegram identity has been confirmed by the whole flow — contact, ✅,
+number matching, whichever of them you turned on. Longer than 128 characters is
+an `IllegalArgumentException` at `create`. Nothing else in the library reads it:
+no notion of "admin", no account merging, no interpretation whatsoever. It is the
+same idea, and the same 128-character budget, as the intent's own `hostRef`.
+
+```java
+@Override
+public AuthApproveResult onApprove(TelegramUserInfo info, AuthContext ctx) {
+    String ref = ctx.getHostRef();
+    if (ref != null && ref.startsWith("link:")) {
+        return link(ref.substring("link:".length()), info);
+    }
+    return login(info);   // ordinary sign-in, exactly as before
+}
+```
+
+### `hostRef` is server-side only
+
+This is a security rule, not a style preference. `hostRef` says *whose account
+this session is allowed to bind to*, so a client that could set it could mint
+`link:admin:7` and attach its own Telegram account to somebody else's.
+
+The stock `POST /session` endpoint therefore **never reads it**, and
+`CreateSessionRequest` has no field for it. Set it in your own code, from an
+already-authenticated principal:
+
+```java
+// your controller; the admin is authenticated by your platform's own session
+var created = sessionService.create(req.getRemoteAddr(), req.getHeader("User-Agent"),
+        "link:admin:" + currentAdminId());
+// return created.rawToken() and the t.me deep link to the browser, as usual
+```
+
+If you would rather extend the stock controller than write an endpoint, there is
+exactly one override point, and it takes the request rather than the body:
+
+```java
+@RestController @RequestMapping("/api/admin-auth")
+public class AdminAuthController extends AbstractTelegramAuthController<AdminUser, AdminSession> {
+
+    public AdminAuthController(AdminSessionService service, TelegramBotModule module) {
+        super(service, module);
+    }
+
+    @Override
+    protected String hostRef(HttpServletRequest request) {
+        Long adminId = currentAdminId(request);         // your session, your cookie, your rules
+        return adminId == null ? null : "link:admin:" + adminId;
+    }
+}
+```
+
+It returns `null` by default, which means "an ordinary login". Because the
+override is your code reading your own server-side state, the rule still holds.
+
+### Linking is host semantics
+
+The library carries the string; what it *means* is yours. Three rules are worth
+stating because the failure modes are unpleasant:
+
+- **Branch, don't assume.** A `hostRef` that is `null` or does not match your
+  linking prefix is an ordinary login and must stay one.
+- **Refuse a second binding, and refuse it with a payload.** If that Telegram id
+  is already bound to a different account, do not rebind — return something the
+  browser can render, such as
+  `new AuthApproveResult(Map.of("linked", false, "reason", "already_bound"))`.
+  Do **not** throw: an exception out of `onApprove` is logged and rethrown by
+  `approve(...)`, the transaction rolls back, and the session is left sitting in
+  its previous state with nothing shown to anybody. The user stares at a spinner
+  and you get a stack trace.
+- **Ask for the phone at the module, not the session.** `requireContact` is a
+  `DefaultAuthFlow.Options` flag on the module, not a per-session choice, so the
+  manager bot's module either asks every login and link for a phone or asks none
+  of them. It is a soft requirement in any case — `/skip` exists.
+
+The `BaseTelegramUser` row is created by the flow at final confirmation exactly as
+it always was, so later sign-ins need nothing extra from you.
+
+### Linking without a login, at intent claim
+
+There is a second way in, and it needs **no library support at all**:
+`onIntentClaimed(intent)` already carries `ownerUserId` — the Telegram id that
+just tapped the link — and `hostRef` — whatever you wrote when you created the
+intent. An admin who creates a bot for their own organisation can be bound right
+there, with no phone step and no second trip through the login flow.
+
+**Only bind self-service links.** An intent URL is a *bearer capability*:
+whoever opens it first claims it. If your admin creates a bot on behalf of
+another organisation and forwards the link, the claimer is that organisation's
+owner — auto-linking them to the admin's account would hand a stranger the
+admin's sign-in. So encode the difference in the `hostRef` itself and read it
+back on claim:
+
+```java
+managedBotService.createIntent(username, name, "bot:42;self:admin:7");  // admin creates it for themselves
+managedBotService.createIntent(username, name, "bot:42");               // admin creates it for someone else
+```
+
+- Mark a link `self:` only when your UI showed it to the authenticated admin for
+  their own use — never for a link they are expected to forward.
+- Bind only when the account has **no** Telegram id yet. If it already has one
+  and a *different* id claims the intent, that means the link was forwarded:
+  surface it in your admin UI, do not rebind.
+- Keep `intent-ttl` short. 30 minutes is the default for this reason.
+- No phone is collected on this path. If you need one, require the linking flow
+  above before granting anything sensitive.
+
+### Manager bot vs tenant bots
+
+Both features live on a `TelegramBotModule`, and it helps to be explicit about
+which one:
+
+- **The manager bot** — one per platform. It owns the `managed_bot` slot
+  (`ManagedBotUpdateHandler`), the `mb_` start-payload route
+  (`ManagedBotIntentFlow`), and a `DefaultAuthFlow` of its own — typically with
+  `requireContact(true)` — for admin login and linking.
+- **Tenant bots** — one per created bot, started by `TenantBotRegistry`
+  ([white-label](#white-label-tenant-bots)). Each has its own `DefaultAuthFlow`
+  for that tenant's end users, its own rate-limit scope, and sessions carrying
+  its `botUserId`.
+
+Nothing new is needed to compose them; they are separate modules and they do not
+interfere.
 
 ## White-label tenant bots
 
@@ -1152,9 +1726,11 @@ each failure swallowed and logged so one bad tenant cannot disturb the manager
 bot or the others.
 
 **You can still declare your own `ManagedBotEvents` bean.** It is not shadowed:
-the bridge is handed every `ManagedBotEvents` in the context and hands each of
-the four callbacks — `onCreated`, `onTokenRotated`, `onDecommissioned`,
-`onTokenFetchFailed` — on to yours. Two rules govern that forwarding:
+the bridge is handed every `ManagedBotEvents` in the context and hands every
+callback on to yours — the four lifecycle ones it acts on (`onCreated`,
+`onTokenRotated`, `onDecommissioned`, `onTokenFetchFailed`) and the four
+[intent](#intents) ones it simply relays (`onIntentClaimed`, `onIntentMatched`,
+`onIntentUnmatched`, `onIntentAmbiguous`). Two rules govern that forwarding:
 
 - **The registry runs first.** Your hook is called *after* the tenant bot has
   been started, restarted or stopped, so a hook that throws cannot keep a tenant
@@ -1197,6 +1773,8 @@ whichever poller wins each race.
 - [x] Contact-share + Approve/Reject inline keyboard (opt-in `Options`), 3-language bot texts.
 - [x] Number matching (`codeConfirmation`) with per-user cooldown, and flow options bindable from YAML.
 - [x] Managed bots (opt-in): `/newbot` deep link, encrypted token custody, lifecycle events, access settings, decommission.
+- [x] Managed-bot intents (opt-in): a created bot is matched to the request that asked for it by the creator's Telegram id, with host-driven manual resolution when matching is ambiguous.
+- [x] Host-account linking: an opaque `hostRef` set server-side at session creation reaches the approve handler, so a host can tell a login from a link.
 - [x] White-label tenant bots (opt-in): a long-poll runtime per managed bot, per-tenant rate limiting, startup restore, poll-failure budget. Single instance only.
 - [ ] SSE & WebSocket transports.
 - [ ] Redis-backed event bus + multi-instance horizontal scaling (would also make in-flight login state survive failover).

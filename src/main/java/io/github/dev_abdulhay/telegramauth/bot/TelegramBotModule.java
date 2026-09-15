@@ -14,6 +14,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Per-user-type configuration object. The host builds one bean per type. It
@@ -39,6 +40,7 @@ public final class TelegramBotModule {
     private final ConfirmCodeGenerator confirmCodeGenerator;
 
     private final Map<String, Consumer<JsonNode>> commands = new ConcurrentHashMap<>();
+    private final Map<String, Predicate<JsonNode>> startPayloadRoutes = new ConcurrentHashMap<>();
     private volatile Consumer<JsonNode> fallback;
     private volatile Consumer<JsonNode> callbackHandler;
     private volatile Consumer<JsonNode> contactHandler;
@@ -70,6 +72,42 @@ public final class TelegramBotModule {
     /** Register or replace a command handler (e.g. {@code "/start"}). */
     public void command(String command, Consumer<JsonNode> handler) {
         commands.put(command, handler);
+    }
+
+    /**
+     * Routes {@code /start <payload>} updates whose payload begins with {@code prefix}
+     * to {@code handler}, <em>before</em> the command registry sees them.
+     *
+     * <p>The handler returns whether it owned the update. {@code false} sends the
+     * update on to the normal {@code /start} handler, and that fall-through is not a
+     * nicety: login tokens are Base64URL, so one in a few hundred thousand of them
+     * begins with any given three-character prefix. A handler that swallowed those
+     * would break a real login silently and unreproducibly.
+     *
+     * @param prefix limited to Telegram's start-payload alphabet {@code [A-Za-z0-9_-]}
+     * @throws IllegalArgumentException if {@code prefix} is blank or contains a character
+     *         outside {@code [A-Za-z0-9_-]}
+     * @throws IllegalStateException if a different handler already holds this prefix
+     */
+    public void startPayload(String prefix, Predicate<JsonNode> handler) {
+        if (prefix == null || prefix.isBlank()) {
+            throw new IllegalArgumentException("a /start payload prefix must not be blank");
+        }
+        for (int i = 0; i < prefix.length(); i++) {
+            char c = prefix.charAt(i);
+            boolean allowed = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9') || c == '_' || c == '-';
+            if (!allowed) {
+                throw new IllegalArgumentException("a /start payload prefix may only contain "
+                        + "A-Z, a-z, 0-9, _ and - but was " + prefix);
+            }
+        }
+        Predicate<JsonNode> current = startPayloadRoutes.get(prefix);
+        if (current != null && current != handler) {
+            throw new IllegalStateException("a /start payload handler for prefix '" + prefix
+                    + "' is already registered on this module");
+        }
+        startPayloadRoutes.put(prefix, handler);
     }
 
     /** Handler for updates with no matching dedicated route (plain text, unknown commands). */
@@ -158,6 +196,7 @@ public final class TelegramBotModule {
     public AuthEventBus getBus() { return bus; }
     public ConfirmCodeGenerator getConfirmCodeGenerator() { return confirmCodeGenerator; }
     public Map<String, Consumer<JsonNode>> getCommands() { return Collections.unmodifiableMap(commands); }
+    public Map<String, Predicate<JsonNode>> getStartPayloadRoutes() { return Collections.unmodifiableMap(startPayloadRoutes); }
     public Consumer<JsonNode> getFallback() { return fallback; }
     public Consumer<JsonNode> getCallbackHandler() { return callbackHandler; }
     public Consumer<JsonNode> getContactHandler() { return contactHandler; }

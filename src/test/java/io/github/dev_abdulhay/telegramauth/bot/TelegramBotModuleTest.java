@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -73,5 +74,28 @@ class TelegramBotModuleTest {
                 .bot(fake)
                 .build();
         assertThat(m.getBot()).isSameAs(fake);
+    }
+
+    @Test
+    void aStartPayloadPrefixCanBeClaimedOnceAndOnlyOnce() {
+        TelegramBotModule m = TelegramBotModule.builder("123:ABC", "demo_bot").build();
+        Predicate<JsonNode> handler = u -> true;
+        m.startPayload("mb_", handler);
+        m.startPayload("mb_", handler);   // same handler: idempotent
+
+        assertThat(m.getStartPayloadRoutes()).containsOnlyKeys("mb_");
+        assertThatThrownBy(() -> m.startPayload("mb_", u -> false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mb_");
+    }
+
+    @Test
+    void aStartPayloadPrefixMustBeUsableInATelegramDeepLink() {
+        TelegramBotModule m = TelegramBotModule.builder("123:ABC", "demo_bot").build();
+
+        assertThatThrownBy(() -> m.startPayload("  ", u -> true))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> m.startPayload("mb:", u -> true))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

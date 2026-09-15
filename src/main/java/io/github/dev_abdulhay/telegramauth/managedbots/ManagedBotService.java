@@ -5,10 +5,12 @@ import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
@@ -47,6 +49,13 @@ public class ManagedBotService {
     private static final Duration ECHO_TTL = Duration.ofMinutes(5);
     /** Hard ceiling on tracked bots, mirroring {@code CodeStrikeTracker}'s bound. */
     private static final int MAX_ECHOES = 10_000;
+    /** Base64URL of 16 random bytes: 22 chars, well inside Telegram's 64-char start payload. */
+    private static final int INTENT_ID_BYTES = 16;
+    private static final int MAX_HOST_REF = 128;
+    /** The purge is a database round trip; once a minute is plenty for a cleanup nobody waits on. */
+    private static final Duration PURGE_INTERVAL = Duration.ofMinutes(1);
+    private static final SecureRandom RNG = new SecureRandom();
+    private static final Base64.Encoder ID_ENC = Base64.getUrlEncoder().withoutPadding();
 
     /**
      * One self-initiated token change we expect Telegram to echo back.
@@ -69,16 +78,37 @@ public class ManagedBotService {
     private final ManagedBotEvents events;
     private final int tokenFetchRetries;
     private final Duration tokenFetchBackoff;
+    private final ManagedBotIntentStore intentStore;
+    private final Duration intentTtl;
+    private final Duration intentRetention;
+    /** JVM-local, like the echo map: several instances purging once a minute each is harmless. */
+    private volatile OffsetDateTime lastPurge;
 
     public ManagedBotService(TelegramBotModule module, ManagedBotTokenStore store,
                              TokenEncryptor encryptor, ManagedBotEvents events,
                              int tokenFetchRetries, Duration tokenFetchBackoff) {
+        this(module, store, encryptor, events, tokenFetchRetries, tokenFetchBackoff,
+                null, Duration.ofMinutes(30), Duration.ofDays(7));
+    }
+
+    /**
+     * @param intentStore {@code null} turns intents off completely: no matching runs
+     *                    and {@link #createIntent} refuses
+     */
+    public ManagedBotService(TelegramBotModule module, ManagedBotTokenStore store,
+                             TokenEncryptor encryptor, ManagedBotEvents events,
+                             int tokenFetchRetries, Duration tokenFetchBackoff,
+                             ManagedBotIntentStore intentStore, Duration intentTtl,
+                             Duration intentRetention) {
         this.module = module;
         this.store = store;
         this.encryptor = encryptor;
         this.events = events;
         this.tokenFetchRetries = Math.max(1, tokenFetchRetries);
         this.tokenFetchBackoff = tokenFetchBackoff == null ? Duration.ZERO : tokenFetchBackoff;
+        this.intentStore = intentStore;
+        this.intentTtl = intentTtl == null ? Duration.ofMinutes(30) : intentTtl;
+        this.intentRetention = intentRetention == null ? Duration.ofDays(7) : intentRetention;
     }
 
     /**
@@ -88,6 +118,153 @@ public class ManagedBotService {
      */
     public String createLink(String suggestedUsername, String suggestedName) {
         return ManagedBotLink.build(module.getUsername(), suggestedUsername, suggestedName);
+    }
+
+    /**
+     * A request to create one bot, and the link that claims it. The user opens the
+     * link, the manager bot learns who they are, and the bot they create afterwards
+     * is matched back to this intent by that identity — which is the one thing an
+     * edited username cannot break.
+     *
+     * @param suggestedUsername may be {@code null}; validated eagerly when present
+     * @param hostRef           opaque, at most 128 characters, never interpreted here
+     * @throws IllegalStateException    when no {@link ManagedBotIntentStore} is configured
+     * @throws IllegalArgumentException for a username Telegram could not accept, or an oversized {@code hostRef}
+     */
+    public ManagedBotIntentLink createIntent(String suggestedUsername, String suggestedName, String hostRef) {
+        ManagedBotIntentStore intents = requireIntentStore();
+        String username = trimToNull(suggestedUsername);
+        if (username != null) {
+            ManagedBotLink.validateUsername(username);
+        }
+        if (hostRef != null && hostRef.length() > MAX_HOST_REF) {
+            throw new IllegalArgumentException("hostRef must be at most " + MAX_HOST_REF
+                    + " characters but was " + hostRef.length());
+        }
+        try {
+            purgeClosedIntents();
+        } catch (RuntimeException e) {
+            // The purge is retention housekeeping nobody is waiting on; it must never
+            // fail the host's createIntent call just because a cleanup round trip did.
+            log.warn("managed-bot intent purge failed", e);
+        }
+        OffsetDateTime now = OffsetDateTime.now();
+        ManagedBotIntent intent = new ManagedBotIntent(newIntentId(), username,
+                trimToNull(suggestedName), hostRef, null, ManagedBotIntentStatus.OPEN, null,
+                now, null, null, now.plus(intentTtl));
+        intents.save(intent);
+        return new ManagedBotIntentLink(intent.id(),
+                "https://t.me/" + module.getUsername().trim() + "?start="
+                        + ManagedBotIntent.START_PREFIX + intent.id(),
+                intent.expiresAt());
+    }
+
+    /** The intent, with an overdue {@code OPEN} row reported — and stored — as {@code EXPIRED}. */
+    public Optional<ManagedBotIntent> findIntent(String intentId) {
+        return requireIntentStore().findById(intentId).map(this::expireIfDue);
+    }
+
+    /**
+     * Ends an intent the host no longer wants. {@code CLAIMED} intents never expire
+     * on their own, so this is the only way one leaves the matching pool.
+     *
+     * @throws ManagedBotIntentException {@code INTENT_NOT_FOUND}, or {@code INTENT_CLOSED}
+     *         when it is already completed, cancelled or expired
+     */
+    public void cancelIntent(String intentId) {
+        ManagedBotIntent intent = findIntent(intentId).orElseThrow(() -> new ManagedBotIntentException(
+                ManagedBotIntentException.Reason.INTENT_NOT_FOUND, "unknown intent " + intentId));
+        if (intent.status() != ManagedBotIntentStatus.OPEN
+                && intent.status() != ManagedBotIntentStatus.CLAIMED) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.INTENT_CLOSED,
+                    "intent " + intentId + " is " + intent.status());
+        }
+        intentStore.save(intent.cancelled());
+    }
+
+    /**
+     * Resolves one {@code /start mb_<id>} tap. Public because a host that replaced
+     * {@code /start} with its own handler still needs this decision.
+     *
+     * <p>The first claim also runs the matching step: the bot may already exist when
+     * the link is opened — a host still handing out {@code createLink}, or a
+     * {@code fetchAndStore} recovery that landed first.
+     */
+    public IntentClaimResult claimIntent(String intentId, long ownerUserId) {
+        ManagedBotIntentStore intents = requireIntentStore();
+        ManagedBotIntent intent = intents.findById(intentId).map(this::expireIfDue).orElse(null);
+        if (intent == null) return new IntentClaimResult(IntentClaim.UNKNOWN, null);
+        boolean sameOwner = intent.ownerUserId() != null && intent.ownerUserId() == ownerUserId;
+        switch (intent.status()) {
+            case EXPIRED, CANCELLED:
+                return new IntentClaimResult(IntentClaim.CLOSED, intent);
+            case COMPLETED:
+                return new IntentClaimResult(
+                        sameOwner ? IntentClaim.COMPLETED : IntentClaim.OTHER_OWNER, intent);
+            case CLAIMED:
+                return new IntentClaimResult(
+                        sameOwner ? IntentClaim.RECLAIMED : IntentClaim.OTHER_OWNER, intent);
+            case OPEN:
+            default:
+                ManagedBotIntent claimed = intent.claimedBy(ownerUserId, OffsetDateTime.now());
+                intents.save(claimed);
+                publish("onIntentClaimed", () -> events.onIntentClaimed(claimed));
+                ManagedBotIntent afterMatch = claimed;
+                try {
+                    afterMatch = matchOnClaim(claimed);
+                } catch (RuntimeException e) {
+                    // The claim itself already succeeded and was announced: if matching
+                    // throws and we let it out, onStart throws, the dispatcher swallows it,
+                    // and the user who just tapped the link gets no reply at all. Falling
+                    // back to the claimed-but-unmatched intent still lets the create-bot
+                    // prompt go out; a re-tap simply tries the match again.
+                    log.warn("intent matching failed on claim for intent {}", intentId, e);
+                }
+                return new IntentClaimResult(IntentClaim.CLAIMED, afterMatch);
+        }
+    }
+
+    private ManagedBotIntentStore requireIntentStore() {
+        if (intentStore == null) {
+            throw new IllegalStateException(
+                    "managed-bot intents need a ManagedBotIntentStore bean");
+        }
+        return intentStore;
+    }
+
+    /**
+     * Expiry is evaluated on read rather than by a scheduler: an intent nobody looks
+     * at costs nothing, and the retention purge reaps the rows this never touches.
+     */
+    private ManagedBotIntent expireIfDue(ManagedBotIntent intent) {
+        if (intent.status() == ManagedBotIntentStatus.OPEN
+                && intent.expiresAt().isBefore(OffsetDateTime.now())) {
+            ManagedBotIntent expired = intent.expired();
+            intentStore.save(expired);
+            return expired;
+        }
+        return intent;
+    }
+
+    private void purgeClosedIntents() {
+        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime last = lastPurge;
+        if (last != null && last.isAfter(now.minus(PURGE_INTERVAL))) return;
+        lastPurge = now;
+        int removed = intentStore.deleteClosedBefore(now.minus(intentRetention));
+        if (removed > 0) log.debug("purged {} closed managed-bot intents", removed);
+    }
+
+    private static String newIntentId() {
+        byte[] buf = new byte[INTENT_ID_BYTES];
+        RNG.nextBytes(buf);
+        return ID_ENC.encodeToString(buf);
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     /** The stored token, decrypted. Reads locally — never calls Telegram. */
@@ -112,7 +289,7 @@ public class ManagedBotService {
         String fresh = module.getBot().replaceManagedBotToken(botUserId);
         ManagedBot saved = persist(existing.botUserId(), existing.username(), existing.firstName(),
                 existing.ownerUserId(), fresh, existing.createdAt());
-        events.onTokenRotated(saved);
+        publish("onTokenRotated", () -> events.onTokenRotated(saved));
         return fresh;
     }
 
@@ -170,7 +347,7 @@ public class ManagedBotService {
             selfInitiated.remove(botUserId);
         }
         store.deleteByBotUserId(botUserId);
-        events.onDecommissioned(botUserId);
+        publish("onDecommissioned", () -> events.onDecommissioned(botUserId));
     }
 
     /**
@@ -204,7 +381,7 @@ public class ManagedBotService {
         } catch (RuntimeException e) {
             log.warn("giving up on the token of managed bot {} after {} attempts",
                     botUserId, tokenFetchRetries, e);
-            events.onTokenFetchFailed(botUserId, ownerUserId, e);
+            publish("onTokenFetchFailed", () -> events.onTokenFetchFailed(botUserId, ownerUserId, e));
             return;
         }
 
@@ -259,11 +436,203 @@ public class ManagedBotService {
                 ownerUserId, rawToken,
                 known.map(ManagedBot::createdAt).orElse(null));
         if (known.isEmpty()) {
-            events.onCreated(saved);
+            // Matching first: it only writes rows. Publishing comes after, so a listener
+            // that throws cannot leave an intent half-linked or swallow the intent event.
+            Runnable intentEvent = null;
+            try {
+                intentEvent = matchOnCreation(saved);
+            } catch (RuntimeException e) {
+                // The bot is already stored and Telegram's offset has moved on: if this
+                // throws and we let it out, onCreated never fires and no update is ever
+                // re-delivered to try again. The intent simply stays CLAIMED, which the
+                // manual resolution screen already knows how to finish.
+                log.warn("intent matching failed for managed bot {}", saved.botUserId(), e);
+            }
+            publish("onCreated", () -> events.onCreated(saved));
+            if (intentEvent != null) intentEvent.run();
         } else {
-            events.onTokenRotated(saved);
+            publish("onTokenRotated", () -> events.onTokenRotated(saved));
         }
         return saved;
+    }
+
+    /**
+     * Links this freshly created bot to one of its creator's waiting intents.
+     *
+     * @return the event to publish once {@code onCreated} has run, or {@code null}
+     *         when there was nothing to decide
+     */
+    private Runnable matchOnCreation(ManagedBot bot) {
+        if (intentStore == null) return null;
+        if (intentStore.findByBotUserId(bot.botUserId()).isPresent()) return null;
+        List<ManagedBotIntent> candidates = candidatesFor(bot);
+        if (candidates.isEmpty()) return null;
+        ManagedBotIntent chosen = pickIntent(candidates, bot.username());
+        if (chosen == null) {
+            return () -> publish("onIntentUnmatched", () -> events.onIntentUnmatched(bot, candidates));
+        }
+        ManagedBotIntent done = chosen.completedWith(bot.botUserId(), OffsetDateTime.now());
+        intentStore.save(done);
+        return () -> publish("onIntentMatched", () -> events.onIntentMatched(bot, done));
+    }
+
+    /**
+     * An intent cannot predate the bot it asked for, so anything created before the
+     * intent existed belongs to some other purpose and is never auto-matched. The
+     * manual resolution screen still lists it — see {@link #findUnassignedBots}.
+     */
+    private List<ManagedBotIntent> candidatesFor(ManagedBot bot) {
+        return intentStore.findClaimedByOwner(bot.ownerUserId()).stream()
+                .filter(i -> !bot.createdAt().isBefore(i.createdAt()))
+                .toList();
+    }
+
+    /** @return the single sensible candidate, or {@code null} when a human has to choose */
+    private static ManagedBotIntent pickIntent(List<ManagedBotIntent> candidates, String username) {
+        if (username != null) {
+            List<ManagedBotIntent> byUsername = candidates.stream()
+                    .filter(i -> i.suggestedUsername() != null
+                            && i.suggestedUsername().equalsIgnoreCase(username))
+                    .toList();
+            if (byUsername.size() == 1) return byUsername.get(0);
+        }
+        return candidates.size() == 1 ? candidates.get(0) : null;
+    }
+
+    /** @return the intent as it now stands — {@code COMPLETED} when a waiting bot fit it */
+    private ManagedBotIntent matchOnClaim(ManagedBotIntent intent) {
+        List<ManagedBot> candidates = unassignedBotsFor(intent, true);
+        if (candidates.isEmpty()) return intent;
+        ManagedBot chosen = pickBot(candidates, intent.suggestedUsername());
+        if (chosen == null) {
+            publish("onIntentAmbiguous", () -> events.onIntentAmbiguous(intent, candidates));
+            return intent;
+        }
+        ManagedBotIntent done = intent.completedWith(chosen.botUserId(), OffsetDateTime.now());
+        intentStore.save(done);
+        publish("onIntentMatched", () -> events.onIntentMatched(chosen, done));
+        return done;
+    }
+
+    /**
+     * The creator's bots that no intent claims, for the screen where a human says
+     * which bot was meant for what. Unfiltered by age on purpose: a bot created
+     * before intents existed is exactly the case this screen has to repair.
+     *
+     * @return empty when the intent is unknown or not {@code CLAIMED}
+     */
+    public List<ManagedBot> findUnassignedBots(String intentId) {
+        ManagedBotIntent intent = findIntent(intentId).orElse(null);
+        if (intent == null || intent.status() != ManagedBotIntentStatus.CLAIMED) return List.of();
+        return unassignedBotsFor(intent, false);
+    }
+
+    /**
+     * Links a bot to an intent by hand, after {@code onIntentUnmatched} or
+     * {@code onIntentAmbiguous} sent the decision to a human.
+     *
+     * @throws ManagedBotIntentException with the reason that applies; a concurrent
+     *         assignment surfaces as {@code BOT_ALREADY_ASSIGNED} through the unique
+     *         {@code bot_user_id} constraint
+     */
+    public ManagedBotIntent assignToIntent(String intentId, long botUserId) {
+        ManagedBotIntentStore intents = requireIntentStore();
+        ManagedBotIntent intent = findIntent(intentId).orElseThrow(() -> new ManagedBotIntentException(
+                ManagedBotIntentException.Reason.INTENT_NOT_FOUND, "unknown intent " + intentId));
+        if (intent.status() != ManagedBotIntentStatus.CLAIMED) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.INTENT_NOT_CLAIMED,
+                    "intent " + intentId + " is " + intent.status());
+        }
+        ManagedBot bot = store.findByBotUserId(botUserId).orElseThrow(() -> new ManagedBotIntentException(
+                ManagedBotIntentException.Reason.BOT_NOT_FOUND, "unknown managed bot " + botUserId));
+        if (intent.ownerUserId() == null || bot.ownerUserId() != intent.ownerUserId()) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.OWNER_MISMATCH,
+                    "managed bot " + botUserId + " was not created by the intent's owner");
+        }
+        if (intents.findByBotUserId(botUserId).isPresent()) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED,
+                    "managed bot " + botUserId + " is already assigned to an intent");
+        }
+        ManagedBotIntent done = intent.completedWith(botUserId, OffsetDateTime.now());
+        try {
+            intents.save(done);
+        } catch (RuntimeException e) {
+            // Only a concurrent assignment explains a failure here, and the unique
+            // bot_user_id index is what arbitrates it — so ask the store who holds the
+            // bot now. Anything else is a genuine store failure and must not come back
+            // to the host wearing a business verdict it can act on.
+            boolean taken;
+            try {
+                taken = intents.findByBotUserId(botUserId).isPresent();
+            } catch (RuntimeException probe) {
+                // The store is failing hard enough that even the probe cannot run — the
+                // save failure is the real news, and losing it would leave a silent hole.
+                e.addSuppressed(probe);
+                throw e;
+            }
+            if (!taken) {
+                log.warn("could not assign managed bot {} to intent {}", botUserId, intentId, e);
+                throw e;
+            }
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED,
+                    "managed bot " + botUserId + " was assigned concurrently", e);
+        }
+        publish("onIntentMatched", () -> events.onIntentMatched(bot, done));
+        return done;
+    }
+
+    /**
+     * Removes a bot the user does not want from the resolution screen: same revoke
+     * and forget as {@link #decommission(long)}, but it refuses a bot some intent
+     * already claims, so a misclick cannot disconnect a live tenant.
+     *
+     * <p>The bot keeps existing on Telegram; only its owner can delete it, in BotFather.
+     */
+    public void decommissionUnassigned(long botUserId) {
+        if (intentStore != null && intentStore.findByBotUserId(botUserId).isPresent()) {
+            throw new ManagedBotIntentException(ManagedBotIntentException.Reason.BOT_ALREADY_ASSIGNED,
+                    "managed bot " + botUserId + " is assigned to an intent");
+        }
+        decommission(botUserId);
+    }
+
+    /**
+     * The creator's bots that no intent claims.
+     *
+     * @param sinceIntent {@code true} drops bots older than the intent — right for
+     *                    automatic matching, wrong for the manual screen, which is
+     *                    exactly where an older bot has to be reachable
+     */
+    private List<ManagedBot> unassignedBotsFor(ManagedBotIntent intent, boolean sinceIntent) {
+        if (intent.ownerUserId() == null) return List.of();
+        return store.findByOwnerUserId(intent.ownerUserId()).stream()
+                .filter(b -> intentStore.findByBotUserId(b.botUserId()).isEmpty())
+                .filter(b -> !sinceIntent || !b.createdAt().isBefore(intent.createdAt()))
+                .toList();
+    }
+
+    /** {@link #pickIntent} from the other side. */
+    private static ManagedBot pickBot(List<ManagedBot> candidates, String suggestedUsername) {
+        if (suggestedUsername != null) {
+            List<ManagedBot> byUsername = candidates.stream()
+                    .filter(b -> b.username() != null && suggestedUsername.equalsIgnoreCase(b.username()))
+                    .toList();
+            if (byUsername.size() == 1) return byUsername.get(0);
+        }
+        return candidates.size() == 1 ? candidates.get(0) : null;
+    }
+
+    /**
+     * Runs a host callback without letting it derail the rest. The white-label bridge
+     * guards every callback already; this brings the direct path in line, which is what
+     * makes "matching state is persisted, then events are published" a promise.
+     */
+    private void publish(String event, Runnable body) {
+        try {
+            body.run();
+        } catch (Throwable t) {
+            log.warn("managed-bot listener failed on {}", event, t);
+        }
     }
 
     /**
