@@ -3,8 +3,8 @@
 **Status:** Draft v0.2
 **Created:** 2026-04-10 14:30
 **Last updated:** 2026-04-10 14:30 (resolved open questions §18)
-**Owner:** a.uralov
-**Target artifact:** `uz.aloqabank:telegram-auth-spring-boot-starter:0.1.0`
+**Owner:** dev-abdulhay
+**Target artifact:** `io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.1.0`
 
 ---
 
@@ -884,7 +884,7 @@ Dependencies (`compileOnly` for host provided):
 
 `META-INF/spring/.../AutoConfiguration.imports`:
 ```
-uz.aloqabank.telegramauth.config.TelegramAuthAutoConfiguration
+io.github.dev_abdulhay.telegramauth.config.TelegramAuthAutoConfiguration
 ```
 
 Activation:
@@ -897,7 +897,7 @@ public class TelegramAuthAutoConfiguration { ... }
 
 ### 14.3 Host integration steps
 
-1. Add dependency: `implementation 'uz.aloqabank:telegram-auth-spring-boot-starter:0.1.0'`.
+1. Add dependency: `implementation 'io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.1.0'`.
 2. Set `telegram.auth.enabled=true` and `telegram.auth.bot.token=...`.
 3. Include the Liquibase changelog:
    ```xml
@@ -908,7 +908,7 @@ public class TelegramAuthAutoConfiguration { ... }
 
 ### 14.4 Publishing
 
-- Internal Nexus: `maven.aloqabank.local/repository/maven-releases/`.
+- Internal Nexus: `nexus.example.com/repository/maven-releases/`.
 - Version scheme: semver. `0.1.0` initial, `0.1.x` for bugfixes, `0.2.0` for new features, `1.0.0` after first production rollout.
 - CI: Gradle `publish` task triggered on git tag `vX.Y.Z`.
 
