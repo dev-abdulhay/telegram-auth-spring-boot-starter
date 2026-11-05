@@ -1,14 +1,14 @@
 # Managed-bot intents (+ host-account linking) — design
 
 **Date:** 2026-09-14 (revised 2026-09-15 against the 0.4.0 codebase; account linking added the same day)
-**Target:** `io.github.dev-abdulhay:telegram-auth-spring-boot-starter` 0.5.0 (library), then Kidzo backend + admin (host)
+**Target:** `io.github.dev-abdulhay:telegram-auth-spring-boot-starter` 0.5.0 (library), then Acme backend + admin (host)
 **Status:** design approved in brainstorming; reviewed against the code; not implemented
 
 Two features ship together in 0.5.0 because they compose: **intents** (§1–§10) correlate a created bot with the request that asked for it, and **host-account linking** (§11) binds a Telegram identity to an account the host already has. The bot-creation flow is what links an admin's Telegram in the first place.
 
 ## Qisqacha (Uzbek)
 
-Kutubxonaning managed-bots qismi bot yaratish havolasini beradi, lekin yaratilgan botni qaysi so'rovga tegishli ekanini aniqlamaydi. Kidzo buni username bo'yicha qiladi, username esa Telegram'da tahrirlanadi. Dev'da shunday bo'ldi: `hs_2_bot` rezerv qilindi, bot `hs_2_dev_bot` bo'lib yaratildi va ulanmadi. Yechim — kutubxonaga «intent» tushunchasini qo'shish: foydalanuvchi avval manager botda `/start` bosadi, kutubxona uning Telegram id'sini intent'ga yozadi, bot yaratilganda intent **yaratuvchi** bo'yicha topiladi. Aniqlab bo'lmasa, platforma foydalanuvchiga uning botlari ro'yxatini ko'rsatib, qaysi bot qaysi maqsadga ekanini tanlatadi va keraksizini o'chirishga imkon beradi.
+Kutubxonaning managed-bots qismi bot yaratish havolasini beradi, lekin yaratilgan botni qaysi so'rovga tegishli ekanini aniqlamaydi. Acme buni username bo'yicha qiladi, username esa Telegram'da tahrirlanadi. Dev'da shunday bo'ldi: `acme_shop_bot` rezerv qilindi, bot `acme_shop_dev_bot` bo'lib yaratildi va ulanmadi. Yechim — kutubxonaga «intent» tushunchasini qo'shish: foydalanuvchi avval manager botda `/start` bosadi, kutubxona uning Telegram id'sini intent'ga yozadi, bot yaratilganda intent **yaratuvchi** bo'yicha topiladi. Aniqlab bo'lmasa, platforma foydalanuvchiga uning botlari ro'yxatini ko'rsatib, qaysi bot qaysi maqsadga ekanini tanlatadi va keraksizini o'chirishga imkon beradi.
 
 ## 1. Problem
 
@@ -16,9 +16,9 @@ Telegram's bot-creation deep link `https://t.me/newbot/<manager>/<suggested_user
 
 Version 0.4.0 stores the token and publishes `ManagedBotEvents.onCreated(ManagedBot)`; correlating the new bot with the host's request is left to the host. The only field a host can match on without extra state is the username, which is unreliable by construction.
 
-Observed in Kidzo dev on 2026-09-14: the org reserved `hs_2_bot`, the owner created `hs_2_dev_bot`, the token was stored (`managed_bot` row, tenant bot polling), but `BotConnectionService.connectPending` logged `created but no pending registration matches`. The org's bot row stayed `pending` and could not be activated.
+Observed in Acme dev on 2026-09-14: the org reserved `acme_shop_bot`, the owner created `acme_shop_dev_bot`, the token was stored (`managed_bot` row, tenant bot polling), but `BotConnectionService.connectPending` logged `created but no pending registration matches`. The org's bot row stayed `pending` and could not be activated.
 
-A host cannot fix this on its own without a second identity channel: Kidzo staff have no linked Telegram id, so `ownerUserId` cannot be compared with anything the host knows.
+A host cannot fix this on its own without a second identity channel: Acme staff have no linked Telegram id, so `ownerUserId` cannot be compared with anything the host knows.
 
 ## 2. Goals and non-goals
 
@@ -157,7 +157,7 @@ void decommissionUnassigned(long botUserId);
 - **Constructor compatibility.** `ManagedBotService`'s 6-arg constructor is public 0.4.0 API and is called with `new` by the auto-configuration and by tests. Intents get an **overload** — `(module, store, encryptor, events, retries, backoff, ManagedBotIntentStore, Duration intentTtl, Duration intentRetention)` — and the existing constructor delegates to it with a `null` store. No existing signature changes.
 - `createIntent` throws `IllegalStateException("managed-bot intents need a ManagedBotIntentStore bean")` when no store is configured, and `IllegalArgumentException` for an invalid username. Reusing `ManagedBotLink`'s rules means **making its `validateUsername` accessible** (package-private → public static, or a public `ManagedBotLink.validateUsername(String)`); validating at creation keeps the exception off the update worker thread, where the claim reply builds the same link.
 - `createIntent` also runs the retention purge opportunistically, at most once per minute (a `volatile OffsetDateTime` guard). JVM-local and not replicated, like the echo map — several instances each purge at most once a minute, which is harmless. (Note: `DefaultAuthFlow.purgeStalePending` is *not* throttled; it sweeps an in-memory map. This one hits the database, hence the guard.)
-- `findUnassignedBots(intentId)`: the intent must be `CLAIMED` (else empty list); returns `tokenStore.findByOwnerUserId(intent.ownerUserId())` minus bots for which `intentStore.findByBotUserId` is present. **Not** filtered by `createdAt`: the manual screen is exactly where an older, pre-intent bot (today's `hs_2_dev_bot`) has to be reachable. Tokens are never exposed (existing `ManagedBot.toString` masking stays).
+- `findUnassignedBots(intentId)`: the intent must be `CLAIMED` (else empty list); returns `tokenStore.findByOwnerUserId(intent.ownerUserId())` minus bots for which `intentStore.findByBotUserId` is present. **Not** filtered by `createdAt`: the manual screen is exactly where an older, pre-intent bot (today's `acme_shop_dev_bot`) has to be reachable. Tokens are never exposed (existing `ManagedBot.toString` masking stays).
 - `assignToIntent(intentId, botUserId)` rules, each failure a `ManagedBotIntentException` with a `Reason`:
   - `INTENT_NOT_FOUND`, `INTENT_NOT_CLAIMED`, `BOT_NOT_FOUND`,
   - `OWNER_MISMATCH` (bot's `ownerUserId` ≠ intent's),
@@ -313,30 +313,30 @@ Test stack is the repo's existing one: JUnit 5 + `spring-boot-starter-test`, **H
 - **Auto-config** (`ManagedBotsAutoConfigTest`): no intent store bean → context starts, no `ManagedBotIntentFlow`, `createIntent` throws; with a store bean → flow registered and the `mb_` route present.
 - Existing 0.4.0 test suite (233 tests) passes untouched.
 
-## 10. Kidzo integration (host, after 0.5.0 is released)
+## 10. Acme integration (host, after 0.5.0 is released)
 
 Tracked as a separate ticket; listed here so the library API is checked against a real consumer.
 
 - Upgrade the starter to 0.5.0; Liquibase changeset for `managed_bot_intent` (entity `ManagedBotIntentEntity extends BaseManagedBotIntent`) plus the `ManagedBotIntentStore` bean.
 - `BotService.createLink` → reserve the `pending` bot row, then `createIntent(suggestedUsername, name, "bot:" + botId)`; return the intent URL to the admin app.
-- `KidzoManagedBotEvents`:
+- `AcmeManagedBotEvents`:
   - `onIntentClaimed` → mark the pending row as confirmed by the Telegram user (for the admin UI).
   - `onIntentMatched` → `BotConnectionService` connects the row identified by `hostRef` (replaces username matching; keep username matching only for bots created before the upgrade).
   - `onIntentUnmatched` / `onIntentAmbiguous` → flag the org's pending rows as "needs assignment".
 - Admin «Botlar» tab: pending row shows "@user confirmed, waiting for the bot"; on "needs assignment" show "Bots you created" with **Assign to this purpose** and **Remove from platform** (ConfirmDialog, text about BotFather, and about the list possibly containing bots from other contexts). Gated by the existing bot-management permission; list fetched only through the org's own intents.
-- Fix the current dev data: org 1's `hs_2_bot` pending row and the unmatched `hs_2_dev_bot` managed bot — create a fresh intent, have the owner tap `/start`, then assign `hs_2_dev_bot` through the new screen (it is older than the intent, so only the manual path offers it).
+- Fix the current dev data: org 1's `acme_shop_bot` pending row and the unmatched `acme_shop_dev_bot` managed bot — create a fresh intent, have the owner tap `/start`, then assign `acme_shop_dev_bot` through the new screen (it is older than the intent, so only the manual path offers it).
 
 Account linking (§11), same ticket or the next one:
 
 - Liquibase: `host_ref VARCHAR(128)` on the auth-session table, plus `telegram_user_id` (or equivalent) on the admin/staff table with a unique constraint — one Telegram identity, one account.
 - "Telegramni bog'lash" button in the admin profile → host endpoint that calls `sessionService.create(ip, ua, "link:admin:" + adminId)` and returns the `t.me/<manager>?start=<token>` URL plus the existing poll endpoint; the manager bot's module runs with `requireContact = true`.
-- `KidzoApproveHandler.onApprove`: `hostRef` starting with `link:` → bind, refusing a rebind with a `{"linked": false, "reason": "already_bound"}` payload; otherwise the normal admin login by Telegram id.
+- `AcmeApproveHandler.onApprove`: `hostRef` starting with `link:` → bind, refusing a rebind with a `{"linked": false, "reason": "already_bound"}` payload; otherwise the normal admin login by Telegram id.
 - Bot creation: mark the intent `self` only when the admin creates a bot for their own organisation; on `onIntentClaimed` bind the claimer's Telegram id to that admin **only** when the account has no Telegram yet. A mismatching claim raises a "link was forwarded" notice in the admin UI instead of rebinding.
 - Admin login page gets "Telegram orqali kirish" once an account can be bound; password (or whatever exists today) stays the primary path.
 
 ## 11. Host-account linking (manager bot)
 
-The platform has its own accounts (Kidzo admins). An admin creates bots for other people **and** signs in to the platform with Telegram. Both need the same missing piece: a way to bind one Telegram identity to one host account.
+The platform has its own accounts (Acme admins). An admin creates bots for other people **and** signs in to the platform with Telegram. Both need the same missing piece: a way to bind one Telegram identity to one host account.
 
 ### 11.1 The three paths, and what the library owes each
 
