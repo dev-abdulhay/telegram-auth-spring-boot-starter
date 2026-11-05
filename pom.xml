@@ -7,7 +7,7 @@
 
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.5.1</version>
     <packaging>jar</packaging>
 
     <name>telegram-auth-spring-boot-starter</name>
@@ -47,6 +47,10 @@
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
+        <!-- release, not just source/target: it also pins the platform API set, so a
+             build on a newer JDK cannot compile against a Java 18+ method and ship a
+             jar that fails at runtime on the 17 this library promises. -->
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
@@ -57,12 +61,19 @@
         <maven-javadoc-plugin.version>3.10.1</maven-javadoc-plugin.version>
         <maven-jar-plugin.version>3.4.2</maven-jar-plugin.version>
         <maven-gpg-plugin.version>3.2.7</maven-gpg-plugin.version>
-        <central-publishing-maven-plugin.version>0.7.0</central-publishing-maven-plugin.version>
+        <!--
+            Keep this current. 0.7.0 deserializes Central's publish-status response
+            into a class that rejects unknown fields, so when Central added a
+            "warnings" field the 0.4.0 release failed with an
+            UnrecognizedPropertyException *after* the artifacts were already
+            uploaded and published — a green publish reported as a red build.
+        -->
+        <central-publishing-maven-plugin.version>0.11.0</central-publishing-maven-plugin.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
-            <!-- Spring Boot BOM — pins every Spring/Jackson/Liquibase/Caffeine version -->
+            <!-- Spring Boot BOM — pins every Spring/Jackson version -->
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>
@@ -92,23 +103,8 @@
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
             <scope>provided</scope>
-        </dependency>
-
-        <!-- Library deps shipped with the starter -->
-        <dependency>
-            <groupId>org.liquibase</groupId>
-            <artifactId>liquibase-core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.github.ben-manes.caffeine</groupId>
-            <artifactId>caffeine</artifactId>
         </dependency>
 
         <!--
@@ -125,6 +121,18 @@
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            wiremock-jetty12 (not plain `wiremock`), so its Jetty stack matches the
+            Jetty 12 Spring Boot's BOM manages — avoids a split Jetty version stack
+            in this pom's own dependency tree and in any host that imports this pom
+            as a BOM. Not managed by the Spring Boot BOM, so the version is pinned.
+        -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-jetty12</artifactId>
+            <version>3.9.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

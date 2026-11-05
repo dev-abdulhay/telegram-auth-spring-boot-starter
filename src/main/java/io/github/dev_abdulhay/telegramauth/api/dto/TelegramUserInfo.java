@@ -9,7 +9,6 @@ package io.github.dev_abdulhay.telegramauth.api.dto;
  * @param lastName      User-confirmed last name; may be {@code null}
  * @param username      Telegram {@code @username}; may be {@code null}
  * @param languageCode  Telegram-detected language ({@code uz}, {@code ru}, {@code en})
- * @param externalUserId  Host-app-owned user id, if previously linked; may be {@code null}
  */
 public record TelegramUserInfo(
         Long telegramId,
@@ -17,7 +16,6 @@ public record TelegramUserInfo(
         String firstName,
         String lastName,
         String username,
-        String languageCode,
-        String externalUserId
+        String languageCode
 ) {
 }
