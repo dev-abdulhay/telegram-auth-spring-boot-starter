@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-11-05
+
+A maintenance release with no code changes: the published classes, resources,
+public API, configuration properties and database requirements are the same as
+in 0.5.0. Upgrading from 0.5.0 needs nothing beyond the version bump.
+
+### Changed
+- Internal design documents in the repository now use generic examples instead
+  of real organisation and project names, and the git history was rewritten to
+  match. Earlier git tags were removed; the 0.1.x–0.5.0 artifacts on Maven
+  Central are unchanged and still resolve.
+
 ## [0.5.0] - 2026-09-15
 
 Two features that compose. **Managed-bot intents** close the hole the 0.4.0
