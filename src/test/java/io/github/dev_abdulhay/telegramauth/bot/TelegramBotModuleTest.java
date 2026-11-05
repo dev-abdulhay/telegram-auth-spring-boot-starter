@@ -8,8 +8,10 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TelegramBotModuleTest {
 
@@ -34,6 +36,36 @@ class TelegramBotModuleTest {
     }
 
     @Test
+    void replacingASingleSlotHandlerThrowsInsteadOfSilentlyDisablingTheFlow() {
+        TelegramBotModule m = TelegramBotModule.builder("123:ABCDEF", "demo_bot").build();
+        Consumer<JsonNode> flowHandler = u -> { };
+        m.onCallbackQuery(flowHandler);
+        m.onContact(flowHandler);
+
+        // re-registering the same handler is a harmless no-op (idempotent wiring)
+        m.onCallbackQuery(flowHandler);
+
+        assertThatThrownBy(() -> m.onCallbackQuery(u -> { }))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("fallback");
+        assertThatThrownBy(() -> m.onContact(u -> { }))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(m.getCallbackHandler()).isSameAs(flowHandler);
+    }
+
+    @Test
+    void proxyDefaultsAreConservative() {
+        TelegramBotModule m = TelegramBotModule.builder("123:ABCDEF", "demo_bot").build();
+        assertThat(m.isTrustProxyHeaders()).isFalse();
+        assertThat(m.getTrustedProxyHops()).isEqualTo(1);
+        assertThat(m.getMaxPendingPerIp()).isEqualTo(50);
+
+        // hop counts below 1 would index past the end of X-Forwarded-For
+        assertThat(TelegramBotModule.builder("123:ABCDEF", "b").trustedProxyHops(0).build()
+                .getTrustedProxyHops()).isEqualTo(1);
+    }
+
+    @Test
     void customBotOverrideIsUsed() {
         TelegramBot fake = new TelegramBot(java.net.http.HttpClient.newHttpClient(), "x") {
             @Override public void sendMessage(long chatId, String text) { /* no network */ }
@@ -42,5 +74,28 @@ class TelegramBotModuleTest {
                 .bot(fake)
                 .build();
         assertThat(m.getBot()).isSameAs(fake);
+    }
+
+    @Test
+    void aStartPayloadPrefixCanBeClaimedOnceAndOnlyOnce() {
+        TelegramBotModule m = TelegramBotModule.builder("123:ABC", "demo_bot").build();
+        Predicate<JsonNode> handler = u -> true;
+        m.startPayload("mb_", handler);
+        m.startPayload("mb_", handler);   // same handler: idempotent
+
+        assertThat(m.getStartPayloadRoutes()).containsOnlyKeys("mb_");
+        assertThatThrownBy(() -> m.startPayload("mb_", u -> false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mb_");
+    }
+
+    @Test
+    void aStartPayloadPrefixMustBeUsableInATelegramDeepLink() {
+        TelegramBotModule m = TelegramBotModule.builder("123:ABC", "demo_bot").build();
+
+        assertThatThrownBy(() -> m.startPayload("  ", u -> true))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> m.startPayload("mb:", u -> true))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

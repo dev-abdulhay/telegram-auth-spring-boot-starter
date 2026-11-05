@@ -3,6 +3,7 @@ package com.example.demo;
 import io.github.dev_abdulhay.telegramauth.api.dto.AuthApproveResult;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBot;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
+import io.github.dev_abdulhay.telegramauth.flow.CodeConfirmation;
 import io.github.dev_abdulhay.telegramauth.flow.DefaultAuthFlow;
 import io.github.dev_abdulhay.telegramauth.security.TokenGenerator;
 import org.springframework.context.annotation.Bean;
@@ -26,6 +27,7 @@ public class DemoTgConfig {
         };
         return TelegramBotModule.builder("TEST", "demo_bot")
                 .bot(fakeBot)
+                .trustProxyHeaders(true)
                 .approveHandler((info, ctx) -> new AuthApproveResult(Map.of("tgId", info.telegramId())))
                 .build();
     }
@@ -39,6 +41,9 @@ public class DemoTgConfig {
 
     @Bean
     DefaultAuthFlow<DemoUser, DemoSession> demoFlow(DemoUserService us, DemoSessionService ss, TelegramBotModule module) {
-        return new DefaultAuthFlow<>(us, ss, module);
+        // the REST tests drive the session service directly; keeping the code step off
+        // means this bean never claims the callback/text slots they do not exercise
+        return new DefaultAuthFlow<>(us, ss, module,
+                DefaultAuthFlow.Options.builder().codeConfirmation(CodeConfirmation.OFF).build());
     }
 }
