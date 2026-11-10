@@ -72,6 +72,11 @@ public class JpaBalanceLedger<A extends BaseBalanceAccount, E extends BaseLedger
     }
 
     @Override
+    public boolean hasEntry(String refKey) {
+        return entries.existsById(refKey);
+    }
+
+    @Override
     public long balance(BalanceAccountKey account) {
         return accounts.findBalance(account.asString()).orElse(0L);
     }

@@ -22,6 +22,17 @@ public abstract class BalanceLedgerContract {
     protected abstract BalanceLedger ledger();
 
     @Test
+    void hasEntryReportsOnlyAppliedRefKeys() {
+        assertThat(ledger().hasEntry("pay:c1")).isFalse();
+        ledger().credit(ACC, 100, "pay:c1", "TOP_UP:pack");
+        assertThatThrownBy(() -> ledger().debit(ACC, 500, "spend:big", "spend"))
+                .isInstanceOf(InsufficientBalanceException.class);
+
+        assertThat(ledger().hasEntry("pay:c1")).isTrue();
+        assertThat(ledger().hasEntry("spend:big")).isFalse();
+    }
+
+    @Test
     void creditThenBalance() {
         assertThat(ledger().balance(ACC)).isZero();
 

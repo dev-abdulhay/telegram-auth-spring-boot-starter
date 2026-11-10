@@ -155,4 +155,27 @@ class TopUpCreditorTest {
 
         assertThat(ledger.balance(GLOBAL_42)).isEqualTo(-100);
     }
+
+    /** The credit failed in onPaid, so the order was never credited: a refund must not take other credits. */
+    @Test
+    void refundOfAnUncreditedOrderLeavesTheBalanceAlone() {
+        TopUpCreditor c = creditor(BalanceScope.GLOBAL, RefundPolicy.REQUIRE_BALANCE);
+        ledger.credit(GLOBAL_42, 500, "pay:other", "TOP_UP:top-up");
+        StarOrder o = paid(null, StarOrderKind.TOP_UP, "top-up", 100, "ch1");
+
+        assertThat(c.check(o)).isEmpty();
+        c.onRefunded(o, RefundSource.BOT);
+        c.onRefunded(o, RefundSource.EXTERNAL);
+        creditor(BalanceScope.GLOBAL, RefundPolicy.ALLOW_NEGATIVE).onRefunded(o, RefundSource.BOT);
+
+        assertThat(ledger.balance(GLOBAL_42)).isEqualTo(500);
+        assertThat(ledger.hasEntry("refund:ch1")).isFalse();
+    }
+
+    @Test
+    void guardDoesNotRequireBalanceForAnUncreditedOrder() {
+        TopUpCreditor c = creditor(BalanceScope.GLOBAL, RefundPolicy.REQUIRE_BALANCE);
+
+        assertThat(c.check(paid(null, StarOrderKind.TOP_UP, "top-up", 100, "ch1"))).isEmpty();
+    }
 }

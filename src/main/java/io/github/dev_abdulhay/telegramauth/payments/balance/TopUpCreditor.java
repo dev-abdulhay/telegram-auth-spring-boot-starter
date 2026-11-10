@@ -19,12 +19,14 @@ import java.util.Optional;
  * {@code "refund:"}), so redelivered events apply exactly once.
  *
  * <p>Also the {@link StarRefundGuard}: under {@link RefundPolicy#REQUIRE_BALANCE} a bot refund is
- * refused once the credited amount is no longer on the balance. Runs before other listeners
+ * refused once the credited amount is no longer on the balance. A refund only takes back credits
+ * that were actually granted: if the {@code pay:} entry is missing, the ledger is left alone. Runs before other listeners
  * so host code observing {@code onPaid} already sees the credited balance.
  */
 public class TopUpCreditor implements StarPaymentEvents, StarRefundGuard, Ordered {
 
     private static final Logger log = LoggerFactory.getLogger(TopUpCreditor.class);
+    private static final String PAY = "pay:";
     static final String SPENT = "Credits from this payment were already spent";
 
     private final BalanceLedger ledger;
@@ -54,7 +56,8 @@ public class TopUpCreditor implements StarPaymentEvents, StarRefundGuard, Ordere
 
     @Override
     public void onRefunded(StarOrder order, RefundSource source) {
-        if (order.credits() <= 0) {
+        if (!wasCredited(order)) {
+            // the credit never landed (e.g. the ledger failed in onPaid): nothing to take back
             return;
         }
         BalanceAccountKey key = keyFor(order.botId(), order.userId());
@@ -76,7 +79,7 @@ public class TopUpCreditor implements StarPaymentEvents, StarRefundGuard, Ordere
 
     @Override
     public Optional<String> check(StarOrder order) {
-        if (policy != RefundPolicy.REQUIRE_BALANCE || order.credits() <= 0) {
+        if (policy != RefundPolicy.REQUIRE_BALANCE || !wasCredited(order)) {
             return Optional.empty();
         }
         return ledger.balance(keyFor(order.botId(), order.userId())) < order.credits()
@@ -88,11 +91,15 @@ public class TopUpCreditor implements StarPaymentEvents, StarRefundGuard, Ordere
         return HIGHEST_PRECEDENCE;
     }
 
+    private boolean wasCredited(StarOrder order) {
+        return order.credits() > 0 && ledger.hasEntry(PAY + order.chargeId());
+    }
+
     private void credit(StarOrder order) {
         if (order.credits() <= 0) {
             return;
         }
-        ledger.credit(keyFor(order.botId(), order.userId()), order.credits(), "pay:" + order.chargeId(),
+        ledger.credit(keyFor(order.botId(), order.userId()), order.credits(), PAY + order.chargeId(),
                 reason("", order));
     }
 

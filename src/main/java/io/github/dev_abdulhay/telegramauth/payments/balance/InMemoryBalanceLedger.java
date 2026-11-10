@@ -38,6 +38,11 @@ public class InMemoryBalanceLedger implements BalanceLedger {
     }
 
     @Override
+    public boolean hasEntry(String refKey) {
+        return entries.containsKey(refKey);
+    }
+
+    @Override
     public long balance(BalanceAccountKey account) {
         Account a = accounts.get(account.asString());
         if (a == null) {

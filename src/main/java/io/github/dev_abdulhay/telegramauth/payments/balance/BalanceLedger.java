@@ -18,6 +18,9 @@ public interface BalanceLedger {
     /** Like {@link #debit} but may take the balance below zero (refunds of spent credits). */
     LedgerResult debitAllowNegative(BalanceAccountKey account, long amount, String refKey, String reason);
 
+    /** @return true if a change with this {@code refKey} was applied (a refused debit leaves none) */
+    boolean hasEntry(String refKey);
+
     /** @return the balance, {@code 0} for an unknown account */
     long balance(BalanceAccountKey account);
 
