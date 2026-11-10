@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-10
+
+Telegram Stars payments, with an optional credits ledger. Both are off by
+default; nothing changes for hosts that do not enable them.
+
+### Added
+- **Payments module** (`telegram.payments.enabled=true`): `StarPaymentService`
+  (`sendInvoice`, `sendTopUpInvoice`, `createInvoiceLink`, `refund`,
+  `cancelSubscription`, `resumeSubscription`, `botStarBalance`), a YAML product
+  catalog (`StarCatalog`), 30-day Stars subscriptions, pre-checkout validation
+  (`PreCheckoutValidator`, `pre-checkout-timeout`), `StarPaymentEvents`,
+  `StarRefundGuard`, and `/paysupport` + `/terms` registered by default.
+  In-memory stores by default; JPA stores via `BaseStarOrder`,
+  `BaseStarSubscription` and their repositories (`JpaStarOrderStore`,
+  `JpaStarSubscriptionStore`). A reconciler on its own daemon thread recovers
+  missed payments and redelivers unfulfilled orders (at-least-once
+  `onPaid`/`onSubscriptionRenewed`). White-label tenant bots are wired
+  automatically.
+- **Balance module** (`telegram.payments.balance.enabled=true`): `BalanceLedger`
+  (`credit`, `debit`, `debitAllowNegative`, `hasEntry`, `balance`, `history`) with
+  idempotent reference keys, `InMemoryBalanceLedger`, `JpaBalanceLedger`,
+  `GLOBAL`/`PER_BOT` scope, `REQUIRE_BALANCE`/`ALLOW_NEGATIVE` refund policy and
+  Stars top-ups (`telegram.payments.top-up.*`).
+- `TelegramBot` payment methods: `sendInvoice`, `createInvoiceLink`,
+  `answerPreCheckoutQuery`, `refundStarPayment`, `editUserStarSubscription`,
+  `getStarTransactions`, `getMyStarBalance`.
+- `TelegramBotModule` hooks: `onPreCheckoutQuery`, `onSuccessfulPayment`,
+  `onRefundedPayment`.
+
+### Changed
+- Every `ManagedBotCustomizer` bean now runs, in `@Order`, instead of only one.
+- `allowed_updates` includes `pre_checkout_query` whenever a payments handler is
+  registered: `[message, callback_query, pre_checkout_query]` for payments
+  alone, plus `managed_bot` when a managed-bot handler is registered too.
+  Telegram keeps the last list sent for a token, so the list is always sent
+  explicitly once payments are on.
+
+### Known limitations
+- Refund events and `onSubscriptionExpired` are at-most-once; the reconciler
+  cursor is in memory, so the first pass after a restart rescans each bot's
+  Star transaction history.
+- A refund does not change the subscription; a charge refunded before it was
+  recorded is still recovered and credited by the reconciler; the
+  `REQUIRES_NEW` writes of the JPA stores and ledger hold a second pooled
+  connection when called inside a host transaction.
+- Hosts using Flyway/Liquibase must create `UNIQUE(charge_id)` on orders,
+  `UNIQUE(first_charge_id)` on subscriptions and the ledger primary keys
+  themselves.
+
 ## [0.5.1] - 2026-11-05
 
 A maintenance release with no code changes: the published classes, resources,
