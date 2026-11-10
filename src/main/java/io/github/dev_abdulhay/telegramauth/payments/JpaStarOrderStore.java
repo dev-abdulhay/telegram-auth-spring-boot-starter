@@ -2,7 +2,9 @@ package io.github.dev_abdulhay.telegramauth.payments;
 
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
@@ -20,11 +22,18 @@ public class JpaStarOrderStore<O extends BaseStarOrder> implements StarOrderStor
 
     private final BaseStarOrderRepository<O> repo;
     private final Supplier<O> factory;
+    private final TransactionTemplate isolated;
 
-    /** @param factory makes a blank, unsaved entity, e.g. {@code TenantStarOrder::new} */
-    public JpaStarOrderStore(BaseStarOrderRepository<O> repo, Supplier<O> factory) {
+    /**
+     * @param factory makes a blank, unsaved entity, e.g. {@code TenantStarOrder::new}
+     * @param txManager used to run the duplicate-prone writes in their own transaction
+     */
+    public JpaStarOrderStore(BaseStarOrderRepository<O> repo, Supplier<O> factory,
+                             PlatformTransactionManager txManager) {
         this.repo = repo;
         this.factory = factory;
+        this.isolated = new TransactionTemplate(txManager);
+        this.isolated.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     @Override
@@ -46,32 +55,33 @@ public class JpaStarOrderStore<O extends BaseStarOrder> implements StarOrderStor
     }
 
     /**
-     * Runs in its own transaction: a charge id already stored on another order violates the
-     * unique constraint, which must yield {@code false} without poisoning a caller's transaction.
+     * The write runs in its own transaction and the unique-constraint violation is caught
+     * <em>outside</em> it: catching inside would leave the transaction rollback-only and the
+     * commit would throw. A charge id already stored on another order yields {@code false}.
      */
     @Override
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public boolean markPaid(String id, String chargeId, OffsetDateTime at) {
         try {
-            return repo.markPaid(id, chargeId, at,
-                    List.of(StarOrderStatus.CREATED, StarOrderStatus.EXPIRED), StarOrderStatus.PAID) == 1;
+            return Boolean.TRUE.equals(isolated.execute(status -> repo.markPaid(id, chargeId, at,
+                    List.of(StarOrderStatus.CREATED, StarOrderStatus.EXPIRED), StarOrderStatus.PAID) == 1));
         } catch (DataIntegrityViolationException e) {
             return false;
         }
     }
 
-    /** Own transaction for the same reason as {@link #markPaid}. */
+    /** Same transaction handling as {@link #markPaid}. */
     @Override
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public boolean insertPaidIfChargeAbsent(StarOrder paid) {
-        if (repo.existsByChargeId(paid.chargeId())) {
-            return false;
-        }
-        O entity = factory.get();
-        apply(entity, paid);
         try {
-            repo.saveAndFlush(entity);
-            return true;
+            return Boolean.TRUE.equals(isolated.execute(status -> {
+                if (repo.existsByChargeId(paid.chargeId())) {
+                    return false;
+                }
+                O entity = factory.get();
+                apply(entity, paid);
+                repo.saveAndFlush(entity);
+                return true;
+            }));
         } catch (DataIntegrityViolationException e) {
             return false;
         }
