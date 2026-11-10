@@ -21,7 +21,7 @@ public class InMemoryStarOrderStore implements StarOrderStore {
     }
 
     @Override
-    public void save(StarOrder o) {
+    public synchronized void save(StarOrder o) {
         byId.put(o.id(), o);
     }
 
@@ -40,6 +40,9 @@ public class InMemoryStarOrderStore implements StarOrderStore {
         StarOrder o = byId.get(id);
         if (o == null || (o.status() != StarOrderStatus.CREATED && o.status() != StarOrderStatus.EXPIRED)) {
             return false;
+        }
+        if (findByChargeId(chargeId).filter(other -> !other.id().equals(id)).isPresent()) {
+            return false;   // mirrors the UNIQUE charge_id constraint
         }
         byId.put(id, copy(o, StarOrderStatus.PAID, chargeId, at, o.fulfilledAt(), o.refundedAt()));
         return true;

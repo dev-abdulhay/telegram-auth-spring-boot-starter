@@ -59,6 +59,17 @@ public abstract class StarOrderStoreContract {
     }
 
     @Test
+    void markPaidRejectsChargeIdUsedByAnotherOrder() {
+        store().save(created("o1"));
+        store().save(created("o2"));
+        assertThat(store().markPaid("o1", "ch1", OffsetDateTime.now())).isTrue();
+
+        assertThat(store().markPaid("o2", "ch1", OffsetDateTime.now())).isFalse();
+        assertThat(store().findById("o2").orElseThrow().status()).isEqualTo(StarOrderStatus.CREATED);
+        assertThat(store().findByChargeId("ch1")).get().extracting(StarOrder::id).isEqualTo("o1");
+    }
+
+    @Test
     void markPaidAcceptsExpired() {
         OffsetDateTime now = OffsetDateTime.now();
         store().save(created("o1", now.minusHours(2), now.minusHours(1)));

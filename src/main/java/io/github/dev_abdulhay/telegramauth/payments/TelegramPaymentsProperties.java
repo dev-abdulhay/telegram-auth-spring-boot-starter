@@ -74,6 +74,14 @@ public class TelegramPaymentsProperties {
         if (topUp.creditsPerStar < 1) {
             throw new IllegalStateException("telegram.payments.top-up.credits-per-star must be >= 1");
         }
+        if (topUp.enabled) {
+            if (topUp.title == null || topUp.title.isEmpty() || topUp.title.length() > 32) {
+                throw new IllegalStateException("telegram.payments.top-up.title must be 1-32 characters");
+            }
+            if (topUp.description == null || topUp.description.isEmpty() || topUp.description.length() > 255) {
+                throw new IllegalStateException("telegram.payments.top-up.description must be 1-255 characters");
+            }
+        }
         products.forEach((code, p) -> {
             String key = "telegram.payments.products." + code;
             if (p.title == null || p.title.isEmpty() || p.title.length() > 32) {

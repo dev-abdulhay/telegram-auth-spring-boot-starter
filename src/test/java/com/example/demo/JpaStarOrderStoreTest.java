@@ -8,11 +8,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.OffsetDateTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Same wiring as {@link JpaManagedBotIntentStoreTest}. */
 @SpringBootTest(classes = DemoApp.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
@@ -28,6 +29,9 @@ class JpaStarOrderStoreTest extends StarOrderStoreContract {
     @Autowired
     private DemoStarOrderRepository repo;
 
+    @Autowired
+    private PlatformTransactionManager txManager;
+
     private StarOrderStore store;
 
     @BeforeEach
@@ -42,13 +46,18 @@ class JpaStarOrderStoreTest extends StarOrderStoreContract {
     }
 
     @Test
-    void chargeIdIsUnique() {
+    void duplicateChargeInsideOuterTransactionYieldsFalseAndCommits() {
         store.save(created("o1"));
-        store.save(created("o2"));
         store.markPaid("o1", "ch1", OffsetDateTime.now());
 
-        assertThatThrownBy(() -> store.markPaid("o2", "ch1", OffsetDateTime.now()))
-                .isInstanceOf(RuntimeException.class);
-        assertThat(store.findByChargeId("ch1")).get().extracting(o -> o.id()).isEqualTo("o1");
+        TransactionTemplate tx = new TransactionTemplate(txManager);
+        Boolean second = tx.execute(status -> {
+            boolean first = store.insertPaidIfChargeAbsent(paidRenewal("r1", "chR"));
+            boolean dup = store.insertPaidIfChargeAbsent(paidRenewal("r2", "chR"));
+            return first && !dup;
+        });
+
+        assertThat(second).isTrue();
+        assertThat(store.findByChargeId("chR")).get().extracting(o -> o.id()).isEqualTo("r1");
     }
 }

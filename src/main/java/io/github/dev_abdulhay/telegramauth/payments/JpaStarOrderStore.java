@@ -2,6 +2,7 @@ package io.github.dev_abdulhay.telegramauth.payments;
 
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
@@ -44,15 +45,24 @@ public class JpaStarOrderStore<O extends BaseStarOrder> implements StarOrderStor
         return repo.findByChargeId(chargeId).map(JpaStarOrderStore::toRecord);
     }
 
+    /**
+     * Runs in its own transaction: a charge id already stored on another order violates the
+     * unique constraint, which must yield {@code false} without poisoning a caller's transaction.
+     */
     @Override
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public boolean markPaid(String id, String chargeId, OffsetDateTime at) {
-        return repo.markPaid(id, chargeId, at,
-                List.of(StarOrderStatus.CREATED, StarOrderStatus.EXPIRED), StarOrderStatus.PAID) == 1;
+        try {
+            return repo.markPaid(id, chargeId, at,
+                    List.of(StarOrderStatus.CREATED, StarOrderStatus.EXPIRED), StarOrderStatus.PAID) == 1;
+        } catch (DataIntegrityViolationException e) {
+            return false;
+        }
     }
 
+    /** Own transaction for the same reason as {@link #markPaid}. */
     @Override
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public boolean insertPaidIfChargeAbsent(StarOrder paid) {
         if (repo.existsByChargeId(paid.chargeId())) {
             return false;

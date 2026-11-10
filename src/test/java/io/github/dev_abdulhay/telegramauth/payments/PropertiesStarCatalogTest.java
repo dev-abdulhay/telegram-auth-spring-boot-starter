@@ -78,6 +78,17 @@ class PropertiesStarCatalogTest {
     }
 
     @Test
+    void validateRejectsLongTopUpTitleWhenEnabled() {
+        TelegramPaymentsProperties props = new TelegramPaymentsProperties();
+        props.getTopUp().setTitle("x".repeat(33));
+        props.validate();   // disabled: not checked
+        props.getTopUp().setEnabled(true);
+        assertThatThrownBy(props::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("top-up.title");
+    }
+
+    @Test
     void defaultsAreAsSpecified() {
         TelegramPaymentsProperties p = new TelegramPaymentsProperties();
         assertThat(p.isEnabled()).isFalse();
