@@ -31,6 +31,32 @@ public abstract class StarSubscriptionStoreContract {
     }
 
     @Test
+    void insertIfAbsentNeverTouchesAnExistingRow() {
+        OffsetDateTime exp = OffsetDateTime.now().plusDays(30);
+        assertThat(store().insertIfAbsent(active("s1", 7L, exp).withStatus(StarSubscriptionStatus.CANCELED)))
+                .isTrue();
+
+        assertThat(store().insertIfAbsent(active("s1", 7L, exp.plusDays(5)))).isFalse();
+
+        StarSubscription s = store().findById("s1").orElseThrow();
+        assertThat(s.status()).isEqualTo(StarSubscriptionStatus.CANCELED);
+        assertThat(s.expiresAt().toInstant()).isEqualTo(exp.toInstant());
+    }
+
+    @Test
+    void extendKeepsACanceledSubscriptionCanceled() {
+        OffsetDateTime now = OffsetDateTime.now();
+        store().save(active("s1", 7L, now).withStatus(StarSubscriptionStatus.CANCELED));
+
+        assertThat(store().extend("s1", "ch2", now.plusDays(30))).isTrue();
+
+        StarSubscription s = store().findById("s1").orElseThrow();
+        assertThat(s.status()).isEqualTo(StarSubscriptionStatus.CANCELED);
+        assertThat(s.lastChargeId()).isEqualTo("ch2");
+        assertThat(s.expiresAt().toInstant()).isEqualTo(now.plusDays(30).toInstant());
+    }
+
+    @Test
     void findByUser() {
         OffsetDateTime exp = OffsetDateTime.now().plusDays(30);
         store().save(active("s1", 7L, exp));

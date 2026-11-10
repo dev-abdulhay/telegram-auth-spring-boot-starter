@@ -25,6 +25,11 @@ public class InMemoryStarSubscriptionStore implements StarSubscriptionStore {
     }
 
     @Override
+    public boolean insertIfAbsent(StarSubscription s) {
+        return byId.putIfAbsent(s.id(), s) == null;
+    }
+
+    @Override
     public Optional<StarSubscription> findById(String id) {
         return Optional.ofNullable(byId.get(id));
     }
@@ -48,7 +53,9 @@ public class InMemoryStarSubscriptionStore implements StarSubscriptionStore {
         if (s == null || !s.expiresAt().isBefore(newExpiry)) {
             return false;
         }
-        byId.put(id, s.renewed(chargeId, newExpiry));
+        StarSubscription renewed = s.renewed(chargeId, newExpiry);
+        byId.put(id, s.status() == StarSubscriptionStatus.CANCELED
+                ? renewed.withStatus(StarSubscriptionStatus.CANCELED) : renewed);
         return true;
     }
 

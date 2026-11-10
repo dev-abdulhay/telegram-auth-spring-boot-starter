@@ -25,10 +25,11 @@ public interface BaseStarSubscriptionRepository<S extends BaseStarSubscription> 
 
     @Transactional
     @Modifying(clearAutomatically = true)
-    @Query("update #{#entityName} s set s.lastChargeId = :chargeId, s.expiresAt = :expiry, s.status = :active "
+    @Query("update #{#entityName} s set s.lastChargeId = :chargeId, s.expiresAt = :expiry, "
+            + "s.status = case when s.status = :expired then :active else s.status end "
             + "where s.id = :id and s.expiresAt < :expiry")
     int extend(@Param("id") String id, @Param("chargeId") String chargeId, @Param("expiry") OffsetDateTime expiry,
-               @Param("active") StarSubscriptionStatus active);
+               @Param("expired") StarSubscriptionStatus expired, @Param("active") StarSubscriptionStatus active);
 
     @Transactional
     @Modifying(clearAutomatically = true)

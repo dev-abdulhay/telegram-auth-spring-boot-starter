@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -12,8 +15,10 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 class StarPaymentUpdateHandlerTest {
 
@@ -410,5 +415,55 @@ class StarPaymentUpdateHandlerTest {
         assertThat(stored.subscriptionId()).isNotNull();
         assertThat(racing.findPaidUnfulfilled(10)).isEmpty();
         assertThat(events).isEmpty();
+    }
+
+    /** A redelivery whose existence check is stale must not reset a subscription canceled meanwhile. */
+    @Test
+    void redeliveryWithAStaleCheckDoesNotOverwriteTheSubscription() {
+        AtomicBoolean stale = new AtomicBoolean();
+        InMemoryStarSubscriptionStore racingSubs = new InMemoryStarSubscriptionStore() {
+            @Override
+            public Optional<StarSubscription> findById(String id) {
+                return stale.getAndSet(false) ? Optional.empty() : super.findById(id);
+            }
+        };
+        StarPaymentService s = new StarPaymentService(main, new PropertiesStarCatalog(props), orders, racingSubs,
+                null, recorder, props, clock);
+        StarPaymentUpdateHandler h = new StarPaymentUpdateHandler(s, orders, racingSubs, null);
+        StarOrder o = s.createInvoiceLink(42, "vip").order();
+        failListener = true;
+        h.completePayment(1000L, 42, o.payload(), "ch-1", 250, at(T0.plus(Duration.ofDays(30))));
+        StarOrder stored = orders.findById(o.id()).orElseThrow();
+        racingSubs.updateLiveStatus(stored.subscriptionId(), StarSubscriptionStatus.CANCELED);
+
+        failListener = false;
+        stale.set(true);
+        h.deliver(stored);
+
+        StarSubscription sub = racingSubs.findById(stored.subscriptionId()).orElseThrow();
+        assertThat(sub.status()).isEqualTo(StarSubscriptionStatus.CANCELED);
+        assertThat(orders.findById(o.id()).orElseThrow().fulfilledAt()).isNotNull();
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void externalRefundStoreFailureIsLoggedWithTheChargeId(CapturedOutput output) {
+        InMemoryStarOrderStore broken = new InMemoryStarOrderStore() {
+            @Override
+            public synchronized boolean markRefunded(String id, OffsetDateTime at) {
+                throw new IllegalStateException("db down");
+            }
+        };
+        StarPaymentService s = new StarPaymentService(main, new PropertiesStarCatalog(props), broken, subs, null,
+                recorder, props, clock);
+        StarPaymentUpdateHandler h = new StarPaymentUpdateHandler(s, broken, subs, null);
+        h.register(main);
+        StarOrder o = s.sendInvoice(7, 42, "pack");
+        h.completePayment(1000L, 42, o.payload(), "ch-9", 100, null);
+
+        assertThatCode(() -> main.getRefundedPaymentHandler().accept(refunded(o.payload(), "ch-9")))
+                .doesNotThrowAnyException();
+
+        assertThat(output).contains("ERROR").contains("ch-9");
     }
 }

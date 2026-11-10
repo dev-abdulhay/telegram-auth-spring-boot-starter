@@ -182,7 +182,8 @@ public class StarPaymentUpdateHandler {
         String sid = order.subscriptionId() != null ? order.subscriptionId() : order.id();
         if (subs.findById(sid).isEmpty()) {
             OffsetDateTime paidAt = order.paidAt() != null ? order.paidAt() : now;
-            subs.save(new StarSubscription(sid, order.botId(), order.userId(), order.productCode(),
+            // insert-only: a row created concurrently (and maybe extended or canceled since) wins
+            subs.insertIfAbsent(new StarSubscription(sid, order.botId(), order.userId(), order.productCode(),
                     order.chargeId(), order.chargeId(), StarSubscriptionStatus.ACTIVE,
                     expiresAt != null ? expiresAt : paidAt.plus(SUBSCRIPTION_PERIOD), now));
         }
@@ -275,17 +276,25 @@ public class StarPaymentUpdateHandler {
     private void handleRefundedPayment(JsonNode update) {
         String chargeId = update.path("message").path("refunded_payment").path("telegram_payment_charge_id")
                 .asText(null);
-        Optional<StarOrder> order = chargeId == null ? Optional.empty() : orders.findByChargeId(chargeId);
-        if (order.isEmpty()) {
-            log.warn("Refund for unknown Stars charge {} ignored", chargeId);
+        StarOrder refunded;
+        try {
+            Optional<StarOrder> order = chargeId == null ? Optional.empty() : orders.findByChargeId(chargeId);
+            if (order.isEmpty()) {
+                log.warn("Refund for unknown Stars charge {} ignored", chargeId);
+                return;
+            }
+            if (!orders.markRefunded(order.get().id(), now())) {
+                return;
+            }
+            refunded = orders.findById(order.get().id()).orElseThrow();
+        } catch (RuntimeException e) {
+            log.error("Recording external refund of Stars charge {} failed; apply it by hand", chargeId, e);
             return;
         }
-        if (orders.markRefunded(order.get().id(), now())) {
-            try {
-                service.events().onRefunded(orders.findById(order.get().id()).orElseThrow(), RefundSource.EXTERNAL);
-            } catch (RuntimeException e) {
-                log.error("onRefunded listener failed for Stars order {} (external refund)", order.get().id(), e);
-            }
+        try {
+            service.events().onRefunded(refunded, RefundSource.EXTERNAL);
+        } catch (RuntimeException e) {
+            log.error("onRefunded listener failed for Stars order {} (external refund)", refunded.id(), e);
         }
     }
 

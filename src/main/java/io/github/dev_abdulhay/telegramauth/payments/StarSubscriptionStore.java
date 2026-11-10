@@ -4,10 +4,21 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 
-/** Persistence for Stars subscriptions. {@code save} is an upsert by id. */
+/**
+ * Persistence for Stars subscriptions. {@code save} is an upsert by id; the payment flow creates
+ * rows only with {@link #insertIfAbsent} and changes them only with the conditional methods below.
+ */
 public interface StarSubscriptionStore {
 
     void save(StarSubscription s);
+
+    /**
+     * Inserts the subscription unless a row with its id exists. An existing row is never
+     * changed, even when it was written concurrently.
+     *
+     * @return true if this call inserted the row
+     */
+    boolean insertIfAbsent(StarSubscription s);
 
     Optional<StarSubscription> findById(String id);
 
@@ -17,8 +28,9 @@ public interface StarSubscriptionStore {
     List<StarSubscription> findLiveExpiringBefore(OffsetDateTime cutoff);
 
     /**
-     * Records a renewal: sets {@code lastChargeId}, {@code expiresAt} and ACTIVE, only if
-     * {@code newExpiry} is later than the stored expiry (an older charge recovered late is a no-op).
+     * Records a renewal: sets {@code lastChargeId} and {@code expiresAt}, only if {@code newExpiry}
+     * is later than the stored expiry (an older charge recovered late is a no-op). An EXPIRED
+     * subscription becomes ACTIVE again; a CANCELED one stays CANCELED.
      *
      * @return true if the subscription was extended
      */

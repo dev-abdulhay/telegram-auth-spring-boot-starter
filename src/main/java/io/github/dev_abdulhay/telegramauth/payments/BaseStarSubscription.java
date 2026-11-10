@@ -5,6 +5,10 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.MappedSuperclass;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
+import jakarta.persistence.Transient;
+import org.springframework.data.domain.Persistable;
 
 import java.time.OffsetDateTime;
 
@@ -14,7 +18,11 @@ import java.time.OffsetDateTime;
  * on the concrete table.
  */
 @MappedSuperclass
-public abstract class BaseStarSubscription {
+public abstract class BaseStarSubscription implements Persistable<String> {
+
+    /** Fresh instances are INSERTed (never merged), so a concurrent duplicate fails on the primary key. */
+    @Transient
+    private boolean newEntity = true;
 
     @Id
     @Column(name = "id", length = 32, nullable = false)
@@ -63,4 +71,11 @@ public abstract class BaseStarSubscription {
     public void setExpiresAt(OffsetDateTime expiresAt) { this.expiresAt = expiresAt; }
     public OffsetDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(OffsetDateTime createdAt) { this.createdAt = createdAt; }
+
+    @Override
+    public boolean isNew() { return newEntity; }
+
+    @PostLoad
+    @PostPersist
+    void markNotNew() { this.newEntity = false; }
 }
