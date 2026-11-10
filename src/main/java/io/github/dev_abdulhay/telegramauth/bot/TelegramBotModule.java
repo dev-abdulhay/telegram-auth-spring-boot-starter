@@ -46,6 +46,9 @@ public final class TelegramBotModule {
     private volatile Consumer<JsonNode> contactHandler;
     private volatile Consumer<JsonNode> textHandler;
     private volatile Consumer<JsonNode> managedBotHandler;
+    private volatile Consumer<JsonNode> preCheckoutHandler;
+    private volatile Consumer<JsonNode> successfulPaymentHandler;
+    private volatile Consumer<JsonNode> refundedPaymentHandler;
 
     private TelegramBotModule(Builder b) {
         this.botToken = b.botToken;
@@ -172,6 +175,38 @@ public final class TelegramBotModule {
     }
 
     public Consumer<JsonNode> getManagedBotHandler() { return managedBotHandler; }
+
+    /**
+     * Handler for {@code pre_checkout_query} updates (Telegram Stars). Single-slot
+     * with the same replace-guard as {@link #onCallbackQuery(Consumer)}.
+     *
+     * @throws IllegalStateException if a different handler is already registered
+     */
+    public void onPreCheckoutQuery(Consumer<JsonNode> handler) {
+        this.preCheckoutHandler = claimSlot("pre_checkout_query", this.preCheckoutHandler, handler);
+    }
+
+    public Consumer<JsonNode> getPreCheckoutHandler() { return preCheckoutHandler; }
+
+    /**
+     * Handler for messages carrying {@code successful_payment}. Single-slot, see
+     * {@link #onPreCheckoutQuery(Consumer)}.
+     */
+    public void onSuccessfulPayment(Consumer<JsonNode> handler) {
+        this.successfulPaymentHandler = claimSlot("successful_payment", this.successfulPaymentHandler, handler);
+    }
+
+    public Consumer<JsonNode> getSuccessfulPaymentHandler() { return successfulPaymentHandler; }
+
+    /**
+     * Handler for messages carrying {@code refunded_payment}. Single-slot, see
+     * {@link #onPreCheckoutQuery(Consumer)}.
+     */
+    public void onRefundedPayment(Consumer<JsonNode> handler) {
+        this.refundedPaymentHandler = claimSlot("refunded_payment", this.refundedPaymentHandler, handler);
+    }
+
+    public Consumer<JsonNode> getRefundedPaymentHandler() { return refundedPaymentHandler; }
 
     private static Consumer<JsonNode> claimSlot(String slot, Consumer<JsonNode> current, Consumer<JsonNode> handler) {
         if (current != null && current != handler) {
