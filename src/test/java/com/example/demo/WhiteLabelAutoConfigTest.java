@@ -6,6 +6,7 @@ import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotEvents;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotService;
 import io.github.dev_abdulhay.telegramauth.managedbots.ManagedBotTokenStore;
 import io.github.dev_abdulhay.telegramauth.managedbots.TelegramManagedBotsAutoConfiguration;
+import io.github.dev_abdulhay.telegramauth.whitelabel.ManagedBotCustomizer;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TelegramWhiteLabelAutoConfiguration;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TenantBotEventBridge;
 import io.github.dev_abdulhay.telegramauth.whitelabel.TenantBotFactory;
@@ -187,5 +188,27 @@ class WhiteLabelAutoConfigTest {
                     .TelegramWhiteLabelProperties.class);
             assertThat(props.getPollFailureBudget()).isEqualTo(java.time.Duration.ofSeconds(30));
         });
+    }
+
+    @TestConfiguration
+    static class TwoCustomizers {
+        static final java.util.List<String> RAN = new java.util.concurrent.CopyOnWriteArrayList<>();
+        @Bean ManagedBotCustomizer first() { return (m, b) -> RAN.add("first"); }
+        @Bean ManagedBotCustomizer second() { return (m, b) -> RAN.add("second"); }
+    }
+
+    @Test
+    void multipleCustomizersAllRun() throws Exception {
+        TwoCustomizers.RAN.clear();
+        runner.withPropertyValues("telegram.white-label.enabled=true")
+                .withUserConfiguration(TwoCustomizers.class)
+                .run(ctx -> {
+                    var registry = ctx.getBean(TenantBotRegistry.class);
+                    var f = TenantBotRegistry.class.getDeclaredField("customizer");
+                    f.setAccessible(true);
+                    var composed = (ManagedBotCustomizer) f.get(registry);
+                    composed.customize(null, null);
+                    assertThat(TwoCustomizers.RAN).containsExactlyInAnyOrder("first", "second");
+                });
     }
 }

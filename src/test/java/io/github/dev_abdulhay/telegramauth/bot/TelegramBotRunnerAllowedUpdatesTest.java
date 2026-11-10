@@ -138,4 +138,44 @@ class TelegramBotRunnerAllowedUpdatesTest {
 
         assertThat(bot.allowedOnSecondPoll).containsExactly("message", "callback_query", "managed_bot");
     }
+
+    @Test
+    void managedBotAndPaymentsRequestPreCheckout() throws Exception {
+        RecordingBot bot = new RecordingBot();
+        TelegramBotModule module = TelegramBotModule.builder("123:ABC", "runner_bot").bot(bot).build();
+        module.onManagedBot(u -> { });
+        module.onPreCheckoutQuery(u -> { });
+        TelegramBotRunner runner = new TelegramBotRunner(module);
+
+        runner.start();
+        try {
+            assertThat(bot.called.await(2, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            runner.stop();
+        }
+
+        assertThat(bot.allowedSeen).containsExactly("message", "callback_query", "managed_bot", "pre_checkout_query");
+    }
+
+    /**
+     * Without an explicit list Telegram keeps the one last sent for the token; a token that once
+     * ran with managed bots would then never receive {@code pre_checkout_query}.
+     */
+    @Test
+    void paymentsOnlySendsAnExplicitListWithPreCheckout() throws Exception {
+        RecordingBot bot = new RecordingBot();
+        TelegramBotModule module = TelegramBotModule.builder("123:ABC", "runner_bot").bot(bot).build();
+        module.onPreCheckoutQuery(u -> { });
+        TelegramBotRunner runner = new TelegramBotRunner(module);
+
+        runner.start();
+        try {
+            assertThat(bot.called.await(2, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            runner.stop();
+        }
+
+        assertThat(bot.overloadUsed).isEqualTo("three-arg");
+        assertThat(bot.allowedSeen).containsExactly("message", "callback_query", "pre_checkout_query");
+    }
 }
