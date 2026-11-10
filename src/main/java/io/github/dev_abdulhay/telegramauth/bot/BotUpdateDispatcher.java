@@ -14,7 +14,8 @@ import java.util.function.Predicate;
  * Parses a Telegram {@code getUpdates} response and routes each update through
  * its module's handlers. Routing order: {@code managed_bot} handler (a
  * top-level {@code Update} field, checked before anything nested in
- * {@code message}), then the {@code callback_query} handler, then — for
+ * {@code message}), then the {@code callback_query} handler, then the payment handlers
+ * ({@code pre_checkout_query}, {@code successful_payment}, {@code refunded_payment}), then — for
  * {@code /start} only — the start-payload routes, then the command registry,
  * then the {@code contact} handler, then the text handler, then the module
  * fallback. Handlers receive the full update {@link JsonNode}.
@@ -88,7 +89,22 @@ public class BotUpdateDispatcher {
             invoke(handler != null ? handler : module.getFallback(), update);
             return;
         }
+        if (update.has("pre_checkout_query")) {
+            Consumer<JsonNode> handler = module.getPreCheckoutHandler();
+            invoke(handler != null ? handler : module.getFallback(), update);
+            return;
+        }
         JsonNode message = update.path("message");
+        if (message.has("successful_payment")) {
+            Consumer<JsonNode> handler = module.getSuccessfulPaymentHandler();
+            invoke(handler != null ? handler : module.getFallback(), update);
+            return;
+        }
+        if (message.has("refunded_payment")) {
+            Consumer<JsonNode> handler = module.getRefundedPaymentHandler();
+            invoke(handler != null ? handler : module.getFallback(), update);
+            return;
+        }
         String text = message.path("text").asText("");
         if (text.startsWith("/")) {
             String command = parseCommand(text);

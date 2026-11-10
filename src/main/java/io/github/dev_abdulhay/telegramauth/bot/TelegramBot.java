@@ -197,6 +197,62 @@ public class TelegramBot {
         postForResult("setManagedBotAccessSettings", body.toString());
     }
 
+    private static String enc(String s) {
+        return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    /** Invoice form fields shared by sendInvoice/createInvoiceLink: XTR, empty provider token, one price. */
+    private static String invoiceFields(String title, String description, String payload, int stars) {
+        com.fasterxml.jackson.databind.node.ArrayNode arr = MAPPER.createArrayNode();
+        arr.addObject().put("label", title).put("amount", stars);
+        String prices = arr.toString();
+        return "title=" + enc(title) + "&description=" + enc(description) + "&payload=" + enc(payload)
+                + "&currency=XTR&provider_token=&prices=" + enc(prices);
+    }
+
+    /** Sends a Stars invoice to a chat; returns the sent Message. */
+    public JsonNode sendInvoice(long chatId, String title, String description, String payload, int stars) {
+        return postForResult("sendInvoice", "chat_id=" + chatId + "&" + invoiceFields(title, description, payload, stars));
+    }
+
+    /**
+     * Creates a Stars invoice link.
+     *
+     * @param subscriptionPeriod seconds (2592000 for 30 days); {@code null} = one-off payment
+     */
+    public String createInvoiceLink(String title, String description, String payload, int stars,
+                                    Integer subscriptionPeriod) {
+        String body = invoiceFields(title, description, payload, stars)
+                + (subscriptionPeriod != null ? "&subscription_period=" + subscriptionPeriod : "");
+        return requireTextResult("createInvoiceLink", postForResult("createInvoiceLink", body));
+    }
+
+    /** @param errorMessage sent only when {@code ok} is false */
+    public void answerPreCheckoutQuery(String queryId, boolean ok, String errorMessage) {
+        String body = "pre_checkout_query_id=" + enc(queryId) + "&ok=" + ok
+                + (!ok && errorMessage != null ? "&error_message=" + enc(errorMessage) : "");
+        postForResult("answerPreCheckoutQuery", body);
+    }
+
+    public void refundStarPayment(long userId, String telegramPaymentChargeId) {
+        postForResult("refundStarPayment",
+                "user_id=" + userId + "&telegram_payment_charge_id=" + enc(telegramPaymentChargeId));
+    }
+
+    public void editUserStarSubscription(long userId, String telegramPaymentChargeId, boolean canceled) {
+        postForResult("editUserStarSubscription", "user_id=" + userId
+                + "&telegram_payment_charge_id=" + enc(telegramPaymentChargeId) + "&is_canceled=" + canceled);
+    }
+
+    /** @return the result object {@code {transactions:[...]}} */
+    public JsonNode getStarTransactions(int offset, int limit) {
+        return postForResult("getStarTransactions", "offset=" + offset + "&limit=" + limit);
+    }
+
+    public long getMyStarBalance() {
+        return postForResult("getMyStarBalance", "").path("amount").asLong();
+    }
+
     /**
      * POSTs and returns the {@code result} node. A 429 is a wait signal rather than
      * a failure: we honour {@code retry_after} once and retry, which is separate
