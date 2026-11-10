@@ -202,9 +202,18 @@ public class TelegramBotRunner {
                     // build after start(), and a snapshot would then pin allowed_updates
                     // to null forever — managed_bot silently never requested. One extra
                     // getter call per long poll is free next to the poll itself.
-                    List<String> allowed = module.getManagedBotHandler() != null
-                            ? List.of("message", "callback_query", "managed_bot")
-                            : null;
+                    // Telegram keeps the last explicit list for the token, so as soon as either
+                    // optional type is wanted the full list is sent every time.
+                    boolean managed = module.getManagedBotHandler() != null;
+                    boolean payments = module.getPreCheckoutHandler() != null;
+                    List<String> allowed = null;
+                    if (managed && payments) {
+                        allowed = List.of("message", "callback_query", "managed_bot", "pre_checkout_query");
+                    } else if (managed) {
+                        allowed = List.of("message", "callback_query", "managed_bot");
+                    } else if (payments) {
+                        allowed = List.of("message", "callback_query", "pre_checkout_query");
+                    }
                     // the 2-arg overload is called (not 3-arg with a null list) so that hosts/tests
                     // overriding only getUpdates(long, int) — see DemoTgConfig — keep working
                     String json = (allowed != null)
