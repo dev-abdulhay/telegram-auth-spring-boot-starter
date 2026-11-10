@@ -375,4 +375,40 @@ class StarPaymentUpdateHandlerTest {
         assertThat(orders.findById(o.id()).orElseThrow().fulfilledAt()).isNotNull();
         assertThat(events).containsExactly("paid:" + o.id());
     }
+
+    @Test
+    void refundLandingBeforeSubscriptionLinkIsNotReverted() {
+        InMemoryStarOrderStore racing = new InMemoryStarOrderStore() {
+            private void refundFirst(String id) {
+                markRefunded(id, at(clock.instant()));   // refunded_payment processed concurrently
+            }
+
+            @Override
+            public synchronized void save(StarOrder o) {
+                if (o.status() == StarOrderStatus.PAID && o.subscriptionId() != null) {
+                    refundFirst(o.id());
+                }
+                super.save(o);
+            }
+
+            @Override
+            public synchronized boolean linkSubscription(String id, String subscriptionId) {
+                refundFirst(id);
+                return super.linkSubscription(id, subscriptionId);
+            }
+        };
+        StarPaymentService s = new StarPaymentService(main, new PropertiesStarCatalog(props), racing, subs, null,
+                recorder, props, clock);
+        StarPaymentUpdateHandler h = new StarPaymentUpdateHandler(s, racing, subs, null);
+        StarOrder o = s.createInvoiceLink(42, "vip").order();
+
+        assertThat(h.completePayment(1000L, 42, o.payload(), "ch-1", 250, at(T0.plus(Duration.ofDays(30)))))
+                .isTrue();
+
+        StarOrder stored = racing.findById(o.id()).orElseThrow();
+        assertThat(stored.status()).isEqualTo(StarOrderStatus.REFUNDED);
+        assertThat(stored.subscriptionId()).isNotNull();
+        assertThat(racing.findPaidUnfulfilled(10)).isEmpty();
+        assertThat(events).isEmpty();
+    }
 }

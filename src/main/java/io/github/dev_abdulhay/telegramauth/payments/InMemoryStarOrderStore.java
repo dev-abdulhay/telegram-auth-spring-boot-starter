@@ -106,6 +106,16 @@ public class InMemoryStarOrderStore implements StarOrderStore {
         return doomed.size();
     }
 
+    @Override
+    public synchronized boolean linkSubscription(String id, String subscriptionId) {
+        StarOrder o = byId.get(id);
+        if (o == null || o.subscriptionId() != null) {
+            return false;
+        }
+        byId.put(id, o.withSubscriptionId(subscriptionId));
+        return true;
+    }
+
     private static StarOrder copy(StarOrder o, StarOrderStatus status, String chargeId, OffsetDateTime paidAt,
                                   OffsetDateTime fulfilledAt, OffsetDateTime refundedAt) {
         return new StarOrder(o.id(), o.botId(), o.userId(), o.productCode(), o.kind(), o.stars(), o.credits(),

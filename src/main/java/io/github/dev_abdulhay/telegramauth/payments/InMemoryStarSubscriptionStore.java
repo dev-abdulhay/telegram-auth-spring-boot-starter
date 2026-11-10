@@ -20,7 +20,7 @@ public class InMemoryStarSubscriptionStore implements StarSubscriptionStore {
     }
 
     @Override
-    public void save(StarSubscription s) {
+    public synchronized void save(StarSubscription s) {
         byId.put(s.id(), s);
     }
 
@@ -40,5 +40,35 @@ public class InMemoryStarSubscriptionStore implements StarSubscriptionStore {
                 .filter(s -> s.status() != StarSubscriptionStatus.EXPIRED)
                 .filter(s -> s.expiresAt().isBefore(cutoff))
                 .toList();
+    }
+
+    @Override
+    public synchronized boolean extend(String id, String chargeId, OffsetDateTime newExpiry) {
+        StarSubscription s = byId.get(id);
+        if (s == null || !s.expiresAt().isBefore(newExpiry)) {
+            return false;
+        }
+        byId.put(id, s.renewed(chargeId, newExpiry));
+        return true;
+    }
+
+    @Override
+    public synchronized boolean expireIfBefore(String id, OffsetDateTime cutoff) {
+        StarSubscription s = byId.get(id);
+        if (s == null || s.status() == StarSubscriptionStatus.EXPIRED || !s.expiresAt().isBefore(cutoff)) {
+            return false;
+        }
+        byId.put(id, s.withStatus(StarSubscriptionStatus.EXPIRED));
+        return true;
+    }
+
+    @Override
+    public synchronized boolean updateLiveStatus(String id, StarSubscriptionStatus status) {
+        StarSubscription s = byId.get(id);
+        if (s == null || s.status() == StarSubscriptionStatus.EXPIRED) {
+            return false;
+        }
+        byId.put(id, s.withStatus(status));
+        return true;
     }
 }

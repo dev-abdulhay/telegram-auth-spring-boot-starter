@@ -58,6 +58,11 @@ public interface BaseStarOrderRepository<O extends BaseStarOrder> extends JpaRep
 
     @Transactional
     @Modifying(clearAutomatically = true)
+    @Query("update #{#entityName} o set o.subscriptionId = :sid where o.id = :id and o.subscriptionId is null")
+    int linkSubscription(@Param("id") String id, @Param("sid") String subscriptionId);
+
+    @Transactional
+    @Modifying(clearAutomatically = true)
     @Query("delete from #{#entityName} o where o.status = :status and o.expiresAt < :cutoff")
     int deleteByStatusAndExpiresAtBefore(@Param("status") StarOrderStatus status,
                                          @Param("cutoff") OffsetDateTime cutoff);

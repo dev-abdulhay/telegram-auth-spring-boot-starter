@@ -94,6 +94,11 @@ public class JpaStarOrderStore<O extends BaseStarOrder> implements StarOrderStor
     }
 
     @Override
+    public boolean linkSubscription(String id, String subscriptionId) {
+        return repo.linkSubscription(id, subscriptionId) == 1;
+    }
+
+    @Override
     @Transactional
     public boolean markRefunded(String id, OffsetDateTime at) {
         return repo.markRefunded(id, at, List.of(StarOrderStatus.PAID), StarOrderStatus.REFUNDED) == 1;

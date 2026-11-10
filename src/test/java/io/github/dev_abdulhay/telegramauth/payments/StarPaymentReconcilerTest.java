@@ -121,9 +121,91 @@ class StarPaymentReconcilerTest {
         bot.addUserTransaction("ch-1", 42, o.payload(), 100, T0.getEpochSecond(), null);
 
         assertThat(reconciler.reconcile().recovered()).isEqualTo(1);
+        assertThat(bot.offsets).containsExactly(0, 100);
         StarOrder o2 = service.sendInvoice(7, 42, "pack");
         bot.addUserTransaction("ch-2", 42, o2.payload(), 100, T0.getEpochSecond(), null);
+        bot.offsets.clear();
         assertThat(reconciler.reconcile().recovered()).isEqualTo(1);
+        assertThat(bot.offsets).containsExactly(100);
+    }
+
+    /** A handler whose recording of charge "ch-bad" fails, as if the store were briefly down. */
+    StarPaymentReconciler reconcilerFailingOn(String badCharge) {
+        StarPaymentUpdateHandler failing = new StarPaymentUpdateHandler(service, orders, subs, null) {
+            @Override
+            public boolean completePayment(Long botId, long userId, String payload, String chargeId,
+                                           int totalAmount, OffsetDateTime subscriptionExpiresAt) {
+                if (chargeId.equals(badCharge)) {
+                    throw new IllegalStateException("db down");
+                }
+                return super.completePayment(botId, userId, payload, chargeId, totalAmount, subscriptionExpiresAt);
+            }
+        };
+        return new StarPaymentReconciler(service, failing, orders, subs);
+    }
+
+    void noise(int n) {
+        for (int i = 0; i < n; i++) {
+            bot.addUserTransaction("noise-" + bot.transactions.size(), 1, "x", 1, T0.getEpochSecond(), null);
+        }
+    }
+
+    @Test
+    void failingTransactionDoesNotBlockLaterRecovery() {
+        StarOrder bad = service.sendInvoice(7, 42, "pack");
+        StarOrder o2 = service.sendInvoice(7, 42, "pack");
+        StarOrder o3 = service.sendInvoice(7, 42, "pack");
+        bot.addUserTransaction("ch-bad", 42, bad.payload(), 100, T0.getEpochSecond(), null);
+        bot.addUserTransaction("ch-2", 42, o2.payload(), 100, T0.getEpochSecond(), null);
+        noise(98);
+        bot.addUserTransaction("ch-3", 42, o3.payload(), 100, T0.getEpochSecond(), null);
+
+        ReconcileReport r = reconcilerFailingOn("ch-bad").reconcile();
+
+        assertThat(r.recovered()).isEqualTo(2);
+        assertThat(orders.findById(o2.id()).orElseThrow().status()).isEqualTo(StarOrderStatus.PAID);
+        assertThat(orders.findById(o3.id()).orElseThrow().status()).isEqualTo(StarOrderStatus.PAID);
+        assertThat(orders.findById(bad.id()).orElseThrow().status()).isEqualTo(StarOrderStatus.CREATED);
+    }
+
+    @Test
+    void cursorStopsAtFirstFailedPage() {
+        StarOrder bad = service.sendInvoice(7, 42, "pack");
+        StarOrder ok = service.sendInvoice(7, 42, "pack");
+        noise(100);                                                                  // page 0: clean
+        bot.addUserTransaction("ch-bad", 42, bad.payload(), 100, T0.getEpochSecond(), null);
+        noise(99);                                                                   // page 1: one failure
+        bot.addUserTransaction("ch-ok", 42, ok.payload(), 100, T0.getEpochSecond(), null);   // page 2
+        StarPaymentReconciler failing = reconcilerFailingOn("ch-bad");
+
+        assertThat(failing.reconcile().recovered()).isEqualTo(1);
+        assertThat(bot.offsets).containsExactly(0, 100, 200);
+
+        bot.offsets.clear();
+        assertThat(failing.reconcile().recovered()).isZero();
+        assertThat(bot.offsets).containsExactly(100, 200);
+    }
+
+    @Test
+    void renewalLandingBeforeExpiryWriteIsNotOverwritten() {
+        InMemoryStarSubscriptionStore racing = new InMemoryStarSubscriptionStore() {
+            @Override
+            public List<StarSubscription> findLiveExpiringBefore(OffsetDateTime cutoff) {
+                List<StarSubscription> due = super.findLiveExpiringBefore(cutoff);
+                extend("s1", "ch-2", at(clock.instant()).plusDays(30));   // renewal recorded meanwhile
+                return due;
+            }
+        };
+        racing.save(new StarSubscription("s1", 1000L, 42, "vip", "ch-1", "ch-1", StarSubscriptionStatus.ACTIVE,
+                at(T0), at(T0)));
+        clock.advance(Duration.ofDays(1));
+        StarPaymentUpdateHandler h = new StarPaymentUpdateHandler(service, orders, racing, null);
+
+        ReconcileReport r = new StarPaymentReconciler(service, h, orders, racing).reconcile();
+
+        assertThat(r.expiredSubscriptions()).isZero();
+        assertThat(racing.findById("s1").orElseThrow().status()).isEqualTo(StarSubscriptionStatus.ACTIVE);
+        assertThat(events).isEmpty();
     }
 
     @Test

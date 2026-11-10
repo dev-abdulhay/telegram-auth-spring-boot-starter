@@ -54,4 +54,45 @@ public abstract class StarSubscriptionStoreContract {
         assertThat(store().findLiveExpiringBefore(now)).extracting(StarSubscription::id)
                 .containsExactlyInAnyOrder("act", "can");
     }
+
+    @Test
+    void extendOnlyMovesExpiryForward() {
+        OffsetDateTime now = OffsetDateTime.now();
+        store().save(active("s1", 7L, now).withStatus(StarSubscriptionStatus.EXPIRED));
+
+        assertThat(store().extend("s1", "ch2", now.plusDays(30))).isTrue();
+        StarSubscription s = store().findById("s1").orElseThrow();
+        assertThat(s.status()).isEqualTo(StarSubscriptionStatus.ACTIVE);
+        assertThat(s.lastChargeId()).isEqualTo("ch2");
+        assertThat(s.firstChargeId()).isEqualTo("first-s1");
+
+        assertThat(store().extend("s1", "ch-old", now.plusDays(10))).isFalse();
+        assertThat(store().findById("s1").orElseThrow().lastChargeId()).isEqualTo("ch2");
+        assertThat(store().extend("missing", "ch", now)).isFalse();
+    }
+
+    @Test
+    void expireIfBeforeOnlyExpiresLiveAndDue() {
+        OffsetDateTime now = OffsetDateTime.now();
+        store().save(active("due", 7L, now.minusHours(2)).withStatus(StarSubscriptionStatus.CANCELED));
+        store().save(active("future", 7L, now.plusDays(1)));
+
+        assertThat(store().expireIfBefore("due", now)).isTrue();
+        assertThat(store().expireIfBefore("due", now)).isFalse();
+        assertThat(store().expireIfBefore("future", now)).isFalse();
+        assertThat(store().findById("due").orElseThrow().status()).isEqualTo(StarSubscriptionStatus.EXPIRED);
+        assertThat(store().findById("future").orElseThrow().status()).isEqualTo(StarSubscriptionStatus.ACTIVE);
+    }
+
+    @Test
+    void updateLiveStatusLeavesExpiredAndExpiryAlone() {
+        OffsetDateTime now = OffsetDateTime.now();
+        store().save(active("s1", 7L, now.plusDays(1)));
+        store().save(active("s2", 7L, now.minusDays(1)).withStatus(StarSubscriptionStatus.EXPIRED));
+
+        assertThat(store().updateLiveStatus("s1", StarSubscriptionStatus.CANCELED)).isTrue();
+        assertThat(store().updateLiveStatus("s2", StarSubscriptionStatus.ACTIVE)).isFalse();
+        assertThat(store().findById("s1").orElseThrow().status()).isEqualTo(StarSubscriptionStatus.CANCELED);
+        assertThat(store().findById("s2").orElseThrow().status()).isEqualTo(StarSubscriptionStatus.EXPIRED);
+    }
 }

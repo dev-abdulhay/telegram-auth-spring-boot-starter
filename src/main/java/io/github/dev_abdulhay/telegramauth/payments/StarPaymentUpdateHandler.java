@@ -147,12 +147,11 @@ public class StarPaymentUpdateHandler {
         StarSubscription sub = subs.findById(linked.subscriptionId()).orElseThrow();
         OffsetDateTime target = subscriptionExpiresAt != null ? subscriptionExpiresAt
                 : later(sub.expiresAt(), now).plus(SUBSCRIPTION_PERIOD);
-        // Extend before recording: max() keeps it idempotent, and a crash in between is
-        // healed when the reconciler records the charge. An older charge recovered late
-        // must not shorten the subscription or replace the latest charge id.
-        if (target.isAfter(sub.expiresAt())) {
-            subs.save(sub.renewed(chargeId, target));
-        }
+        // Extend before recording: the store only moves expiry forward, which keeps this
+        // idempotent, and a crash in between is healed when the reconciler records the charge.
+        // An older charge recovered late must not shorten the subscription or replace the
+        // latest charge id.
+        subs.extend(sub.id(), chargeId, target);
         long credits = service.catalog().find(original.productCode()).map(StarProduct::credits)
                 .orElse(original.credits());
         StarOrder renewal = new StarOrder(StarOrderIds.newId(), botId, userId, original.productCode(),
@@ -180,9 +179,10 @@ public class StarPaymentUpdateHandler {
         if (order.subscriptionId() != null) {
             return order;
         }
-        StarOrder linked = orders.findById(order.id()).orElse(order).withSubscriptionId(sid);
-        orders.save(linked);
-        return linked;
+        // Conditional write of the link column only: a full-row save here could revert a
+        // refund or fulfilment that landed since the order was read.
+        orders.linkSubscription(order.id(), sid);
+        return orders.findById(order.id()).orElse(order.withSubscriptionId(sid));
     }
 
     private boolean isSubscription(StarOrder order, OffsetDateTime subscriptionExpiresAt) {

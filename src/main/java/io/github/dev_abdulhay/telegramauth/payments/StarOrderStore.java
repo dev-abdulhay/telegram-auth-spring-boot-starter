@@ -37,4 +37,12 @@ public interface StarOrderStore {
 
     /** Deletes {@code EXPIRED} orders with {@code expiresAt < cutoff}. */
     int deleteExpiredBefore(OffsetDateTime cutoff);
+
+    /**
+     * Sets {@code subscriptionId} only if the order has none yet, touching no other column, so a
+     * concurrent status transition (e.g. a refund) is never reverted.
+     *
+     * @return true if this call linked the order
+     */
+    boolean linkSubscription(String id, String subscriptionId);
 }

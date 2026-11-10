@@ -72,14 +72,11 @@ public class StarPaymentReconciler implements SmartLifecycle {
         int expiredSubs = 0;
         OffsetDateTime cutoff = now.minus(props.getReconcile().getSubscriptionGrace());
         for (StarSubscription s : subs.findLiveExpiringBefore(cutoff)) {
-            // Re-read so a renewal recorded since the query is not overwritten.
-            StarSubscription current = subs.findById(s.id()).orElse(null);
-            if (current == null || current.status() == StarSubscriptionStatus.EXPIRED
-                    || !current.expiresAt().isBefore(cutoff)) {
+            // Conditional write: a renewal recorded since the query wins.
+            if (!subs.expireIfBefore(s.id(), cutoff)) {
                 continue;
             }
-            StarSubscription expired = current.withStatus(StarSubscriptionStatus.EXPIRED);
-            subs.save(expired);
+            StarSubscription expired = subs.findById(s.id()).orElse(s.withStatus(StarSubscriptionStatus.EXPIRED));
             expiredSubs++;
             try {
                 service.events().onSubscriptionExpired(expired);
@@ -104,31 +101,36 @@ public class StarPaymentReconciler implements SmartLifecycle {
     }
 
     /**
-     * Pages through the bot's transactions from its cursor. The cursor only moves past a full
-     * page in which every transaction was handled, so a charge that failed to record is
-     * retried on the next run instead of being skipped.
+     * Pages through all of the bot's transactions from its cursor. A transaction that fails
+     * to record does not stop the scan; it only pins the cursor at the first page that had a
+     * failure, so the next run retries it (already-recorded charges are skipped idempotently).
      */
     private int recover(Long botId, TelegramBotModule module) {
         int recovered = 0;
         int offset = cursors.getOrDefault(botId, 0);
+        boolean failedSoFar = false;
         while (true) {
             JsonNode txs = module.getBot().getStarTransactions(offset, PAGE).path("transactions");
-            boolean allHandled = true;
+            boolean pageFailed = false;
             for (JsonNode tx : txs) {
                 try {
                     if (recoverOne(botId, tx)) {
                         recovered++;
                     }
                 } catch (RuntimeException e) {
-                    allHandled = false;
-                    log.warn("Recovering Stars transaction {} on bot {} failed", tx.path("id").asText(), botId, e);
+                    pageFailed = true;
+                    log.warn("Recovering Stars transaction {} on bot {} failed; retried next run",
+                            tx.path("id").asText(), botId, e);
                 }
             }
-            if (txs.size() < PAGE || !allHandled) {
+            if (txs.size() < PAGE) {
                 return recovered;
             }
+            failedSoFar |= pageFailed;
             offset += PAGE;
-            cursors.put(botId, offset);
+            if (!failedSoFar) {
+                cursors.put(botId, offset);
+            }
         }
     }
 

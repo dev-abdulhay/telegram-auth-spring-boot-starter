@@ -162,4 +162,18 @@ public abstract class StarOrderStoreContract {
         assertThat(StarOrderIds.parsePayload("so:../")).isEmpty();
         assertThat(StarOrderIds.parsePayload(null)).isEmpty();
     }
+
+    @Test
+    void linkSubscriptionOnlySetsIdAndOnlyOnce() {
+        store().save(created("o1"));
+        store().markPaid("o1", "ch1", OffsetDateTime.now());
+        store().markRefunded("o1", OffsetDateTime.now());
+
+        assertThat(store().linkSubscription("o1", "sub1")).isTrue();
+        assertThat(store().linkSubscription("o1", "sub2")).isFalse();
+        StarOrder o = store().findById("o1").orElseThrow();
+        assertThat(o.subscriptionId()).isEqualTo("sub1");
+        assertThat(o.status()).isEqualTo(StarOrderStatus.REFUNDED);
+        assertThat(store().linkSubscription("missing", "sub1")).isFalse();
+    }
 }

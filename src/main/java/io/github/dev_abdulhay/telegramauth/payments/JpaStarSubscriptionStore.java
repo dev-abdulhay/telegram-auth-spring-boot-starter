@@ -59,6 +59,21 @@ public class JpaStarSubscriptionStore<S extends BaseStarSubscription> implements
                 .map(JpaStarSubscriptionStore::toRecord).toList();
     }
 
+    @Override
+    public boolean extend(String id, String chargeId, OffsetDateTime newExpiry) {
+        return repo.extend(id, chargeId, newExpiry, StarSubscriptionStatus.ACTIVE) == 1;
+    }
+
+    @Override
+    public boolean expireIfBefore(String id, OffsetDateTime cutoff) {
+        return repo.expireIfBefore(id, cutoff, LIVE, StarSubscriptionStatus.EXPIRED) == 1;
+    }
+
+    @Override
+    public boolean updateLiveStatus(String id, StarSubscriptionStatus status) {
+        return repo.updateLiveStatus(id, LIVE, status) == 1;
+    }
+
     private static StarSubscription toRecord(BaseStarSubscription e) {
         return new StarSubscription(e.getId(), e.getBotId(), e.getUserId(), e.getProductCode(),
                 e.getFirstChargeId(), e.getLastChargeId(), e.getStatus(), e.getExpiresAt(), e.getCreatedAt());

@@ -185,7 +185,7 @@ public class StarPaymentService {
             throw new StarPaymentException("subscription " + subscriptionId + " has expired");
         }
         moduleFor(s.botId()).getBot().editUserStarSubscription(s.userId(), s.lastChargeId(), canceled);
-        subs.save(s.withStatus(canceled ? StarSubscriptionStatus.CANCELED : StarSubscriptionStatus.ACTIVE));
+        subs.updateLiveStatus(s.id(), canceled ? StarSubscriptionStatus.CANCELED : StarSubscriptionStatus.ACTIVE);
     }
 
     private StarProduct product(String code) {

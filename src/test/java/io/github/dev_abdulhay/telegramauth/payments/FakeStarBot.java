@@ -26,6 +26,7 @@ class FakeStarBot extends TelegramBot {
     final List<String> refunds = new CopyOnWriteArrayList<>();
     final List<String> subscriptionEdits = new CopyOnWriteArrayList<>();
     final List<JsonNode> transactions = new CopyOnWriteArrayList<>();
+    final List<Integer> offsets = new CopyOnWriteArrayList<>();
     volatile boolean failTransactions;
     volatile long balance;
 
@@ -79,6 +80,7 @@ class FakeStarBot extends TelegramBot {
 
     @Override
     public JsonNode getStarTransactions(int offset, int limit) {
+        offsets.add(offset);
         if (failTransactions) {
             throw new TelegramApiException(500, "boom");
         }
