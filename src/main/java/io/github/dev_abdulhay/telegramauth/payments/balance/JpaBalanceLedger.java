@@ -13,23 +13,25 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
- * JPA-backed {@link BalanceLedger}. Each operation runs in its own transaction: the entry row
- * (primary key = refKey) is inserted first, then the balance is changed by one {@code UPDATE};
- * a debit that matches no row throws {@link InsufficientBalanceException} and rolls the entry
- * back with it.
- *
- * <p>Concurrent inserts of the same account or refKey surface as
- * {@link DataIntegrityViolationException}. It is caught <em>outside</em> the transaction
- * (catching inside would leave it rollback-only) and the operation is retried in a fresh one,
- * which then sees the committed row: an existing refKey replays as {@code applied=false}.
+ * JPA-backed {@link BalanceLedger}. An operation takes two committed steps:
+ * <ol>
+ *   <li>the account row is created if absent, in its own transaction (a concurrent creator
+ *       wins harmlessly: its primary-key violation just means the row exists);</li>
+ *   <li>one transaction INSERTs the entry (primary key = refKey) and changes the balance with a
+ *       single {@code UPDATE}. A debit that matches no row throws
+ *       {@link InsufficientBalanceException} and rolls the entry back with it.</li>
+ * </ol>
+ * The entry's primary key is the only idempotency gate: the entities are
+ * {@link org.springframework.data.domain.Persistable}, so a new entry is always a real INSERT
+ * (never a merge that could UPDATE a row committed by a concurrent caller), and a duplicate refKey
+ * fails with {@link DataIntegrityViolationException}. That exception is caught <em>outside</em>
+ * the transaction (catching inside would leave it rollback-only) and replays as
+ * {@code applied=false}; the losing transaction's balance update is rolled back with it.
  *
  * @param <A> the host's concrete {@link BaseBalanceAccount} entity
  * @param <E> the host's concrete {@link BaseLedgerEntry} entity
  */
 public class JpaBalanceLedger<A extends BaseBalanceAccount, E extends BaseLedgerEntry> implements BalanceLedger {
-
-    /** One lost race on the account row plus one on the entry row; the third attempt must see both. */
-    private static final int MAX_ATTEMPTS = 3;
 
     private final BaseBalanceAccountRepository<A> accounts;
     private final BaseLedgerEntryRepository<E> entries;
@@ -84,32 +86,47 @@ public class JpaBalanceLedger<A extends BaseBalanceAccount, E extends BaseLedger
 
     private LedgerResult apply(BalanceAccountKey key, long amount, String refKey, String reason, Mode mode) {
         LedgerArgs.check(key, amount, refKey, reason);
-        for (int attempt = 1; ; attempt++) {
-            try {
-                return isolated.execute(status -> attempt(key, amount, refKey, reason, mode));
-            } catch (DataIntegrityViolationException e) {
-                if (attempt == MAX_ATTEMPTS) {
-                    throw e;
-                }
+        if (entries.existsById(refKey)) {
+            return replay(key);
+        }
+        ensureAccount(key);
+        try {
+            return isolated.execute(status -> write(key, amount, refKey, reason, mode));
+        } catch (DataIntegrityViolationException e) {
+            // the refKey was committed by a concurrent caller; this transaction was rolled back
+            if (entries.existsById(refKey)) {
+                return replay(key);
             }
+            throw e;
         }
     }
 
-    private LedgerResult attempt(BalanceAccountKey key, long amount, String refKey, String reason, Mode mode) {
+    private void ensureAccount(BalanceAccountKey key) {
         String k = key.asString();
-        if (entries.existsById(refKey)) {
-            return new LedgerResult(false, balance(key));
+        if (accounts.existsById(k)) {
+            return;
         }
+        try {
+            isolated.executeWithoutResult(status -> {
+                A a = accountFactory.get();
+                a.setAccountKey(k);
+                a.setBotId(key.botId());
+                a.setUserId(key.userId());
+                a.setBalance(0);
+                a.setUpdatedAt(OffsetDateTime.now());
+                accounts.saveAndFlush(a);
+            });
+        } catch (DataIntegrityViolationException e) {
+            if (!accounts.existsById(k)) {
+                throw e;
+            }
+            // created concurrently; the existing row and its balance are untouched
+        }
+    }
+
+    private LedgerResult write(BalanceAccountKey key, long amount, String refKey, String reason, Mode mode) {
+        String k = key.asString();
         OffsetDateTime now = nextStamp();
-        if (!accounts.existsById(k)) {
-            A a = accountFactory.get();
-            a.setAccountKey(k);
-            a.setBotId(key.botId());
-            a.setUserId(key.userId());
-            a.setBalance(0);
-            a.setUpdatedAt(now);
-            accounts.saveAndFlush(a);
-        }
         E e = entryFactory.get();
         e.setRefKey(refKey);
         e.setAccountKey(k);
@@ -128,6 +145,10 @@ public class JpaBalanceLedger<A extends BaseBalanceAccount, E extends BaseLedger
             throw new InsufficientBalanceException(amount, balance(key));
         }
         return new LedgerResult(true, balance(key));
+    }
+
+    private LedgerResult replay(BalanceAccountKey key) {
+        return new LedgerResult(false, balance(key));
     }
 
     /** Strictly increasing timestamps keep {@link #history} ordering stable for same-instant writes. */

@@ -14,6 +14,8 @@ import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -58,6 +60,58 @@ class JpaBalanceLedgerTest extends BalanceLedgerContract {
     @Override
     protected BalanceLedger ledger() {
         return ledger;
+    }
+
+    /**
+     * Repository proxy whose existence pre-check is stale once per id after the first operation
+     * (the row was committed by someone else between the check and the insert), so only the
+     * database can stop the duplicate. Later checks see the truth.
+     */
+    @SuppressWarnings("unchecked")
+    private <R> R blindExists(R target, Class<R> type) {
+        java.util.Set<Object> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        java.util.Set<Object> lied = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        return (R) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("existsById")) {
+                        Object id = args[0];
+                        if (!seen.add(id) && lied.add(id)) {
+                            return false;
+                        }
+                    }
+                    try {
+                        return method.invoke(target, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+    }
+
+    /** The race "entry committed after our existence check" made deterministic. */
+    @Test
+    void entryCommittedAfterTheExistenceCheckIsNotAppliedAgain() {
+        BalanceLedger racing = new JpaBalanceLedger<>(accounts,
+                blindExists(entries, DemoLedgerEntryRepository.class),
+                DemoBalanceAccount::new, DemoLedgerEntry::new, txManager);
+        racing.credit(ACC, 10, "pay:x", "a");
+
+        LedgerResult again = racing.credit(ACC, 10, "pay:x", "a");
+
+        assertThat(again).isEqualTo(new LedgerResult(false, 10));
+        assertThat(ledger.balance(ACC)).isEqualTo(10);
+    }
+
+    /** The race "account committed after our existence check" must not reset the balance. */
+    @Test
+    void accountCommittedAfterTheExistenceCheckKeepsItsBalance() {
+        BalanceLedger racing = new JpaBalanceLedger<>(blindExists(accounts, DemoBalanceAccountRepository.class),
+                entries, DemoBalanceAccount::new, DemoLedgerEntry::new, txManager);
+        racing.credit(ACC, 10, "pay:1", "a");
+
+        LedgerResult second = racing.credit(ACC, 10, "pay:2", "a");
+
+        assertThat(second).isEqualTo(new LedgerResult(true, 20));
+        assertThat(ledger.balance(ACC)).isEqualTo(20);
     }
 
     @Test
@@ -113,9 +167,10 @@ class JpaBalanceLedgerTest extends BalanceLedgerContract {
             pool.shutdownNow();
         }
 
-        // 10 distinct odd refKeys + the shared one exactly once
-        assertThat(applied.get()).isEqualTo(11);
+        // the balance is the invariant: 10 distinct odd refKeys + the shared one exactly once
         assertThat(ledger.balance(fresh)).isEqualTo(110);
         assertThat(entries.count()).isEqualTo(11);
+        assertThat(entries.findById("pay:same")).isPresent();
+        assertThat(applied.get()).isEqualTo(11);
     }
 }

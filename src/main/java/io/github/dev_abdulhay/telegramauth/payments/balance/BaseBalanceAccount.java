@@ -3,6 +3,10 @@ package io.github.dev_abdulhay.telegramauth.payments.balance;
 import jakarta.persistence.Column;
 import jakarta.persistence.Id;
 import jakarta.persistence.MappedSuperclass;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
+import jakarta.persistence.Transient;
+import org.springframework.data.domain.Persistable;
 
 import java.time.OffsetDateTime;
 
@@ -11,7 +15,11 @@ import java.time.OffsetDateTime;
  * {@code @Entity @Table(name = "...")}. The id is {@link BalanceAccountKey#asString()}.
  */
 @MappedSuperclass
-public abstract class BaseBalanceAccount {
+public abstract class BaseBalanceAccount implements Persistable<String> {
+
+    /** Fresh instances are INSERTed (never merged), so a concurrent duplicate fails on the primary key. */
+    @Transient
+    private boolean newEntity = true;
 
     @Id
     @Column(name = "account_key", length = 48, nullable = false)
@@ -39,4 +47,14 @@ public abstract class BaseBalanceAccount {
     public void setBalance(long balance) { this.balance = balance; }
     public OffsetDateTime getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(OffsetDateTime updatedAt) { this.updatedAt = updatedAt; }
+
+    @Override
+    public String getId() { return accountKey; }
+
+    @Override
+    public boolean isNew() { return newEntity; }
+
+    @PostLoad
+    @PostPersist
+    void markNotNew() { this.newEntity = false; }
 }

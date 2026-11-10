@@ -3,6 +3,10 @@ package io.github.dev_abdulhay.telegramauth.payments.balance;
 import jakarta.persistence.Column;
 import jakarta.persistence.Id;
 import jakarta.persistence.MappedSuperclass;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
+import jakarta.persistence.Transient;
+import org.springframework.data.domain.Persistable;
 
 import java.time.OffsetDateTime;
 
@@ -12,7 +16,11 @@ import java.time.OffsetDateTime;
  * The primary key on {@code ref_key} is what makes every change apply at most once.
  */
 @MappedSuperclass
-public abstract class BaseLedgerEntry {
+public abstract class BaseLedgerEntry implements Persistable<String> {
+
+    /** Fresh instances are INSERTed (never merged), so a concurrent duplicate fails on the primary key. */
+    @Transient
+    private boolean newEntity = true;
 
     @Id
     @Column(name = "ref_key", length = 160, nullable = false)
@@ -40,4 +48,14 @@ public abstract class BaseLedgerEntry {
     public void setReason(String reason) { this.reason = reason; }
     public OffsetDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(OffsetDateTime createdAt) { this.createdAt = createdAt; }
+
+    @Override
+    public String getId() { return refKey; }
+
+    @Override
+    public boolean isNew() { return newEntity; }
+
+    @PostLoad
+    @PostPersist
+    void markNotNew() { this.newEntity = false; }
 }
