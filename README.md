@@ -14,8 +14,8 @@ cookie — whatever you decide).
 
 ## What's in it
 
-Three independent layers, each with its own switch. The auth flow stands alone;
-managed bots need it; white-label needs both.
+Four layers, each with its own switch. The auth flow stands alone;
+managed bots need it; white-label needs both; payments need only a bot.
 
 | Feature | What it does | Turned on by |
 | --- | --- | --- |
@@ -28,6 +28,7 @@ managed bots need it; white-label needs both.
 | [Managed-bot intents](#intents) | Matches a created bot back to the request that asked for it by the creator's Telegram id, so an edited username no longer orphans the bot | declare a `ManagedBotIntentStore` bean |
 | [Host-account linking](#linking-a-telegram-account-to-a-host-account) | An opaque `hostRef` set server-side at session creation reaches your approve handler, so you can tell a login from "admin 7 is linking their Telegram" | comes with the flow |
 | [White-label tenant bots](#white-label-tenant-bots) | Every managed bot gets its own polling runtime and session service, so each tenant authenticates through its own branded bot | `telegram.white-label.enabled=true` |
+| [Telegram Stars payments](#telegram-stars-payments) | Sell digital goods, subscriptions and balance top-ups in Stars: invoices, pre-checkout, idempotent fulfilment events, refunds, a reconciler that recovers missed payments, and an optional credits ledger | `telegram.payments.enabled=true` |
 
 Every property is listed in the [configuration reference](#configuration-reference).
 [Status & roadmap](#status--roadmap) says what is *not* built yet.
@@ -63,14 +64,14 @@ for free; override a method to change the behaviour.
 <dependency>
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.5.1</version>
+    <version>0.6.0</version>
 </dependency>
 ```
 
 **Gradle (Kotlin DSL):**
 
 ```kotlin
-implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.5.1")
+implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.6.0")
 ```
 
 Then enable the starter:
@@ -1763,6 +1764,294 @@ whichever poller wins each race.
 > explicitly out of scope for this release. Run exactly one instance with
 > `telegram.white-label.enabled=true`.
 
+## Telegram Stars payments
+
+Sell digital goods and services through your bot in **Telegram Stars (`XTR`)**.
+Telegram requires Stars for digital goods and services, so this module speaks
+nothing else: every invoice has currency `XTR`, an empty `provider_token` and
+exactly one price line. Click, Payme and other fiat providers are **not
+covered**.
+
+Off by default. Turn it on with `telegram.payments.enabled=true`; it needs a
+`TelegramBotModule` bean (the main bot) and creates no tables or controllers of
+its own. With no further wiring it runs on **in-memory** stores — fine for a
+demo, and each store logs one `WARN` saying it is not for production.
+
+### Configuration
+
+Every property, with its default:
+
+```yaml
+telegram:
+  payments:
+    enabled: false                  # master switch
+    order-ttl: 30m                  # an unpaid order is refused at pre-checkout after this
+    pre-checkout-timeout: 5s        # must be > 0 and < 10s, else startup fails
+    pre-checkout-reject-message: "This order is no longer available, please try again"
+    order-retention: 90d            # expired orders older than this are deleted
+    reconcile:
+      enabled: true
+      interval: 15m
+      subscription-grace: 1h
+    support:
+      enabled: true                 # register /paysupport and /terms
+      paysupport-text: "For payment issues, reply here and our team will help you. Telegram support cannot help with purchases made in this bot."
+      terms-text: "By paying you agree to the terms of this service."
+    top-up:
+      enabled: false                # sell balance credits for free-amount Stars
+      min-stars: 10
+      max-stars: 10000
+      credits-per-star: 1
+      title: "Balance top-up"       # 1-32 characters
+      description: "Top up your balance"  # 1-255 characters
+    products:                       # a fixed catalog, keyed by product code
+      pro-month:
+        title: "Pro plan"           # 1-32 characters
+        description: "30 days of Pro"  # 1-255 characters
+        stars: 250                  # >= 1; <= 10000 for a subscription
+        credits: 0                  # credited to the balance on payment (>= 0)
+        subscription: true          # 30-day auto-renewing Stars subscription
+    balance:
+      enabled: false                # separate switch, see "Balance ledger"
+      scope: GLOBAL                 # GLOBAL | PER_BOT
+      refund-policy: REQUIRE_BALANCE  # REQUIRE_BALANCE | ALLOW_NEGATIVE
+```
+
+Invalid values (title/description length, stars range, `pre-checkout-timeout`,
+`top-up` bounds) fail startup. A product list that lives in your own database
+instead of YAML: declare a `StarCatalog` bean (`find(code)`, `all()`) and the
+YAML catalog backs off.
+
+### Selling something
+
+Inject `StarPaymentService`. Products come from the catalog; each call creates
+an order whose invoice payload is `so:<orderId>`.
+
+```java
+@Service
+class Shop {
+    private final StarPaymentService payments;
+
+    Shop(StarPaymentService payments) { this.payments = payments; }
+
+    // In the bot chat: a one-off product (a subscription product is refused here)
+    StarOrder offerInChat(long chatId, long userId) {
+        return payments.sendInvoice(chatId, userId, "report-pdf");
+    }
+
+    // Free-amount top-up (needs top-up.enabled=true): stars * credits-per-star credits
+    StarOrder offerTopUp(long chatId, long userId) {
+        return payments.sendTopUpInvoice(chatId, userId, 100);
+    }
+
+    // For a Mini App, or for a subscription: returns a URL, not a chat message
+    String linkFor(long userId) {
+        return payments.createInvoiceLink(userId, "pro-month").url();
+    }
+}
+```
+
+Each method has an overload with a leading `Long botId` to sell through a
+white-label tenant bot (`null` = the main bot).
+
+**Mini App flow.** `createInvoiceLink(userId, productCode)` on the server, hand
+the `url` to the front end, then open it there:
+
+```js
+Telegram.WebApp.openInvoice(url, (status) => { /* "paid" | "cancelled" | "failed" | "pending" */ });
+```
+
+Treat the callback as a UI hint only — fulfil from the `onPaid` event, which
+comes from Telegram's own `successful_payment` update.
+
+Other methods: `refund(orderId)` (returns the Stars to the buyer, runs every
+refund guard first), `cancelSubscription(id)` / `resumeSubscription(id)` (the
+subscription stays usable until it expires), `botStarBalance(botId)`.
+
+### Reacting to payments
+
+Declare `StarPaymentEvents` beans. Every method is a no-op default, so
+implement only what you need:
+
+```java
+@Component
+class Fulfilment implements StarPaymentEvents {
+    @Override public void onPaid(StarOrder order) { /* grant what order.productCode() sold */ }
+    @Override public void onRefunded(StarOrder order, RefundSource source) { /* take it back */ }
+    @Override public void onSubscriptionRenewed(StarSubscription sub, StarOrder renewal) { }
+    @Override public void onSubscriptionExpired(StarSubscription sub) { }
+}
+```
+
+**Make every listener idempotent.** `onPaid` and `onSubscriptionRenewed` are
+delivered **at least once**: an order stays unfulfilled until every listener
+returned without throwing, and the reconciler redelivers unfulfilled orders. A
+listener that throws will be called again; one that is slow or crashes
+mid-way can be called twice. Key your side effects on `order.id()` (or
+`order.chargeId()`).
+
+### Extension points
+
+| Bean | Role | If several |
+|---|---|---|
+| `StarCatalog` | Which products exist | one; replaces the YAML catalog |
+| `StarOrderStore` | Order persistence | one; default in-memory |
+| `StarSubscriptionStore` | Subscription persistence | one; default in-memory |
+| `StarPaymentEvents` | Payment lifecycle callbacks | **all** receive events, in `@Order` |
+| `StarRefundGuard` | `Optional<String> check(StarOrder)`; a non-empty value vetoes a refund with that reason | **all** are composed, first veto wins |
+| `PreCheckoutValidator` | `Optional<String> validate(StarOrder, JsonNode)`; a non-empty value rejects the payment with that message. Runs inside `pre-checkout-timeout` — keep it fast | one |
+
+With the balance layer on, its `TopUpCreditor` is both a `StarPaymentEvents`
+and a `StarRefundGuard`, and always runs **first**, so your listeners already
+see the credited balance.
+
+### Persisting with JPA
+
+Like the rest of the starter, you own the tables: subclass the mapped
+superclasses, declare the repositories, and wire the stores.
+
+```java
+@Entity @Table(name = "star_order",
+        indexes = {
+            @Index(name = "ix_star_order_status_paid", columnList = "status, fulfilled_at"),
+            @Index(name = "ix_star_order_status_expires", columnList = "status, expires_at")})
+public class StarOrderEntity extends BaseStarOrder { }
+
+@Entity @Table(name = "star_subscription",
+        indexes = {
+            @Index(name = "ix_star_sub_user", columnList = "user_id"),
+            @Index(name = "ix_star_sub_status_expires", columnList = "status, expires_at")})
+public class StarSubscriptionEntity extends BaseStarSubscription { }
+
+public interface StarOrderRepository extends BaseStarOrderRepository<StarOrderEntity> { }
+public interface StarSubscriptionRepository extends BaseStarSubscriptionRepository<StarSubscriptionEntity> { }
+
+@Configuration
+class StarsPersistenceConfig {
+    @Bean
+    StarOrderStore starOrderStore(StarOrderRepository repo, PlatformTransactionManager tx) {
+        return new JpaStarOrderStore<>(repo, StarOrderEntity::new, tx);
+    }
+
+    @Bean
+    StarSubscriptionStore starSubscriptionStore(StarSubscriptionRepository repo) {
+        return new JpaStarSubscriptionStore<>(repo, StarSubscriptionEntity::new);
+    }
+}
+```
+
+The order table keeps `charge_id` unique — that is what makes a replayed
+payment update harmless. `JpaStarOrderStore` takes the transaction manager
+because its duplicate-prone writes run in their own `REQUIRES_NEW`
+transaction.
+
+### Balance ledger (credits)
+
+Optional and separate: `telegram.payments.balance.enabled=true` (in addition to
+`telegram.payments.enabled=true`). A paid order with `credits > 0` — a product
+with `credits:` set, or a top-up — adds that many credits to the buyer's
+balance. The balance is a plain integer ledger keyed by `BalanceAccountKey(botId, userId)`;
+the key is `(null, userId)` under `scope: GLOBAL` (one balance across all bots)
+and `(botId, userId)` under `PER_BOT`.
+
+Spend credits with `BalanceLedger.debit`, passing a **stable** reference key:
+
+```java
+@Service
+class Generator {
+    private final BalanceLedger ledger;
+
+    Generator(BalanceLedger ledger) { this.ledger = ledger; }
+
+    String generate(long userId, String jobId) {
+        try {
+            // same refKey (here "job:" + jobId) applied twice = a no-op
+            LedgerResult r = ledger.debit(new BalanceAccountKey(null, userId), 5, "job:" + jobId, "image generation");
+            // r.applied() is false when this refKey was already charged; r.balance() is the balance now
+            return doTheWork(jobId);
+        } catch (InsufficientBalanceException e) {
+            // e.required(), e.available(); nothing was recorded
+            throw new IllegalStateException("top up first", e);
+        }
+    }
+}
+```
+
+`credit`, `debit`, `debitAllowNegative`, `balance(account)` and
+`history(account, page, size)` complete the interface. Derive `refKey` from
+the thing being paid for (a job id, an order id), never from a timestamp or
+random value — a retry must produce the same key or it charges twice.
+
+**Refund policy** decides what happens when a paid order that credited the
+balance is refunded and the credits are already spent:
+
+| `refund-policy` | Behaviour |
+|---|---|
+| `REQUIRE_BALANCE` (default) | The refund is refused while the balance cannot cover the credited amount |
+| `ALLOW_NEGATIVE` | The refund goes through and the balance may go negative |
+
+JPA persistence for the ledger:
+
+```java
+@Entity @Table(name = "balance_account")
+public class BalanceAccountEntity extends BaseBalanceAccount { }
+
+@Entity @Table(name = "ledger_entry",
+        indexes = @Index(name = "ix_ledger_entry_account", columnList = "account_key, created_at"))
+public class LedgerEntryEntity extends BaseLedgerEntry { }
+
+public interface BalanceAccountRepository extends BaseBalanceAccountRepository<BalanceAccountEntity> { }
+public interface LedgerEntryRepository extends BaseLedgerEntryRepository<LedgerEntryEntity> { }
+
+@Bean
+BalanceLedger balanceLedger(BalanceAccountRepository accounts, LedgerEntryRepository entries,
+                            PlatformTransactionManager tx) {
+    return new JpaBalanceLedger<>(accounts, entries, BalanceAccountEntity::new, LedgerEntryEntity::new, tx);
+}
+```
+
+Without such a bean the ledger is `InMemoryBalanceLedger`, which loses every
+balance on restart.
+
+### `/paysupport` and `/terms`
+
+Telegram requires a bot that takes payments to answer `/paysupport` and to
+offer `/terms`. They are registered for you (`support.enabled=true`, with the
+texts above) — set real texts. If your own code already registered either
+command, yours is kept and the default is skipped. Disable with
+`support.enabled=false` only if you handle both yourself.
+
+### Tenant (white-label) bots
+
+With `telegram.white-label.enabled=true`, payments contributes a
+`ManagedBotCustomizer`, so every tenant bot gets the same pre-checkout,
+payment and refund handlers and the same support commands, and is registered
+with `StarPaymentService` automatically. Pass the tenant's `botId` to the
+`StarPaymentService` methods to bill through it. All `ManagedBotCustomizer`
+beans now run (in `@Order`), yours included.
+
+### Hooks on `TelegramBotModule`
+
+For custom wiring (the auto-config uses these): `onPreCheckoutQuery`,
+`onSuccessfulPayment` and `onRefundedPayment` take a `Consumer<JsonNode>`.
+Each is single-slot and throws `IllegalStateException` if a different handler
+is already registered. `TelegramBot` gains `sendInvoice`, `createInvoiceLink`,
+`answerPreCheckoutQuery`, `refundStarPayment`, `editUserStarSubscription`,
+`getStarTransactions` and `getMyStarBalance`.
+
+### Known v1 limitations
+
+- **Refund events and `onSubscriptionExpired` are at-most-once.** A crash
+  between recording the change and calling your listener loses the call;
+  reconcile against your own data if you must not miss one.
+- **The reconciler cursor is in memory.** The first pass after a restart rescans
+  each bot's Star transaction history, so a fresh start does a bit more work
+  than later passes (it is idempotent).
+- The reconciler runs on its **own daemon thread**; you do not need
+  `@EnableScheduling`.
+- Single instance, like the rest of the polling runtime.
+- Fiat providers (Click, Payme, cards) are out of scope.
+
 ## Status & roadmap
 
 > **MVP.** Long-polling transport, in-memory per-module event bus, single
@@ -1776,6 +2065,7 @@ whichever poller wins each race.
 - [x] Managed-bot intents (opt-in): a created bot is matched to the request that asked for it by the creator's Telegram id, with host-driven manual resolution when matching is ambiguous.
 - [x] Host-account linking: an opaque `hostRef` set server-side at session creation reaches the approve handler, so a host can tell a login from a link.
 - [x] White-label tenant bots (opt-in): a long-poll runtime per managed bot, per-tenant rate limiting, startup restore, poll-failure budget. Single instance only.
+- [x] Telegram Stars payments (opt-in): invoices, subscriptions, refunds, reconciler, optional credits ledger.
 - [ ] SSE & WebSocket transports.
 - [ ] Redis-backed event bus + multi-instance horizontal scaling (would also make in-flight login state survive failover).
 

@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-10
+
+Telegram Stars payments, with an optional credits ledger. Both are off by
+default; nothing changes for hosts that do not enable them.
+
+### Added
+- **Payments module** (`telegram.payments.enabled=true`): `StarPaymentService`
+  (`sendInvoice`, `sendTopUpInvoice`, `createInvoiceLink`, `refund`,
+  `cancelSubscription`, `resumeSubscription`, `botStarBalance`), a YAML product
+  catalog (`StarCatalog`), 30-day Stars subscriptions, pre-checkout validation
+  (`PreCheckoutValidator`, `pre-checkout-timeout`), `StarPaymentEvents`,
+  `StarRefundGuard`, and `/paysupport` + `/terms` registered by default.
+  In-memory stores by default; JPA stores via `BaseStarOrder`,
+  `BaseStarSubscription` and their repositories (`JpaStarOrderStore`,
+  `JpaStarSubscriptionStore`). A reconciler on its own daemon thread recovers
+  missed payments and redelivers unfulfilled orders (at-least-once
+  `onPaid`/`onSubscriptionRenewed`). White-label tenant bots are wired
+  automatically.
+- **Balance module** (`telegram.payments.balance.enabled=true`): `BalanceLedger`
+  (`credit`, `debit`, `debitAllowNegative`, `balance`, `history`) with
+  idempotent reference keys, `InMemoryBalanceLedger`, `JpaBalanceLedger`,
+  `GLOBAL`/`PER_BOT` scope, `REQUIRE_BALANCE`/`ALLOW_NEGATIVE` refund policy and
+  Stars top-ups (`telegram.payments.top-up.*`).
+- `TelegramBot` payment methods: `sendInvoice`, `createInvoiceLink`,
+  `answerPreCheckoutQuery`, `refundStarPayment`, `editUserStarSubscription`,
+  `getStarTransactions`, `getMyStarBalance`.
+- `TelegramBotModule` hooks: `onPreCheckoutQuery`, `onSuccessfulPayment`,
+  `onRefundedPayment`.
+
+### Changed
+- Every `ManagedBotCustomizer` bean now runs, in `@Order`, instead of only one.
+- `allowed_updates` includes `pre_checkout_query` when a managed-bot handler and
+  a payments handler are both registered.
+
+### Known limitations
+- Refund events and `onSubscriptionExpired` are at-most-once; the reconciler
+  cursor is in memory, so the first pass after a restart rescans each bot's
+  Star transaction history.
+
 ## [0.5.1] - 2026-11-05
 
 A maintenance release with no code changes: the published classes, resources,
