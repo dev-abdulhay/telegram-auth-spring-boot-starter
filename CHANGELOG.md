@@ -24,7 +24,7 @@ default; nothing changes for hosts that do not enable them.
   `onPaid`/`onSubscriptionRenewed`). White-label tenant bots are wired
   automatically.
 - **Balance module** (`telegram.payments.balance.enabled=true`): `BalanceLedger`
-  (`credit`, `debit`, `debitAllowNegative`, `balance`, `history`) with
+  (`credit`, `debit`, `debitAllowNegative`, `hasEntry`, `balance`, `history`) with
   idempotent reference keys, `InMemoryBalanceLedger`, `JpaBalanceLedger`,
   `GLOBAL`/`PER_BOT` scope, `REQUIRE_BALANCE`/`ALLOW_NEGATIVE` refund policy and
   Stars top-ups (`telegram.payments.top-up.*`).
@@ -36,13 +36,23 @@ default; nothing changes for hosts that do not enable them.
 
 ### Changed
 - Every `ManagedBotCustomizer` bean now runs, in `@Order`, instead of only one.
-- `allowed_updates` includes `pre_checkout_query` when a managed-bot handler and
-  a payments handler are both registered.
+- `allowed_updates` includes `pre_checkout_query` whenever a payments handler is
+  registered: `[message, callback_query, pre_checkout_query]` for payments
+  alone, plus `managed_bot` when a managed-bot handler is registered too.
+  Telegram keeps the last list sent for a token, so the list is always sent
+  explicitly once payments are on.
 
 ### Known limitations
 - Refund events and `onSubscriptionExpired` are at-most-once; the reconciler
   cursor is in memory, so the first pass after a restart rescans each bot's
   Star transaction history.
+- A refund does not change the subscription; a charge refunded before it was
+  recorded is still recovered and credited by the reconciler; the
+  `REQUIRES_NEW` writes of the JPA stores and ledger hold a second pooled
+  connection when called inside a host transaction.
+- Hosts using Flyway/Liquibase must create `UNIQUE(charge_id)` on orders,
+  `UNIQUE(first_charge_id)` on subscriptions and the ledger primary keys
+  themselves.
 
 ## [0.5.1] - 2026-11-05
 

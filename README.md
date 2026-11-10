@@ -632,8 +632,12 @@ documented above — a host can enable either alone, both together, or neither.
 > **This narrows the update stream once enabled.** As soon as a
 > `managed_bot` handler is registered on a `TelegramBotModule`, that module's
 > poller starts sending Telegram an explicit `allowed_updates` list —
-> `["message", "callback_query", "managed_bot"]` — because Telegram's own
-> default list excludes `managed_bot`. If your host relied on the default list
+> `["message", "callback_query", "managed_bot"]`, plus `"pre_checkout_query"`
+> when [Stars payments](#telegram-stars-payments) are on — because Telegram's
+> own default list excludes `managed_bot`. Payments alone send
+> `["message", "callback_query", "pre_checkout_query"]`: Telegram keeps the
+> last list sent for a token, so a token that once ran with managed bots would
+> otherwise never get `pre_checkout_query` again. If your host relied on the default list
 > to observe other update types through `module.fallback(...)` (for example
 > `my_chat_member`, to detect that a user blocked the bot), you will stop
 > receiving them on that module once managed bots are enabled on it. The
@@ -1934,16 +1938,26 @@ class StarsPersistenceConfig {
     }
 
     @Bean
-    StarSubscriptionStore starSubscriptionStore(StarSubscriptionRepository repo) {
-        return new JpaStarSubscriptionStore<>(repo, StarSubscriptionEntity::new);
+    StarSubscriptionStore starSubscriptionStore(StarSubscriptionRepository repo, PlatformTransactionManager tx) {
+        return new JpaStarSubscriptionStore<>(repo, StarSubscriptionEntity::new, tx);
     }
 }
 ```
 
 The order table keeps `charge_id` unique — that is what makes a replayed
-payment update harmless. `JpaStarOrderStore` takes the transaction manager
-because its duplicate-prone writes run in their own `REQUIRES_NEW`
-transaction.
+payment update harmless. `JpaStarOrderStore` and `JpaStarSubscriptionStore`
+take the transaction manager because their duplicate-prone writes (a renewal
+order, a new subscription row) run in their own `REQUIRES_NEW` transaction.
+
+> **Using Flyway or Liquibase?** The `unique = true` / `@Id` mappings only
+> create constraints under `spring.jpa.hibernate.ddl-auto`. With your own
+> migrations, create them yourself — idempotency depends on them:
+>
+> - `UNIQUE (charge_id)` on the order table (renewals are deduplicated by it);
+> - `UNIQUE (first_charge_id)` on the subscription table;
+> - the primary keys: `id` on both tables and, with the ledger, `account_key` on
+>   the account table and `ref_key` on the entry table (each ledger change
+>   applies at most once because of the `ref_key` primary key).
 
 ### Balance ledger (credits)
 
@@ -1977,8 +1991,8 @@ class Generator {
 }
 ```
 
-`credit`, `debit`, `debitAllowNegative`, `balance(account)` and
-`history(account, page, size)` complete the interface. Derive `refKey` from
+`credit`, `debit`, `debitAllowNegative`, `hasEntry(refKey)`, `balance(account)`
+and `history(account, page, size)` complete the interface. Derive `refKey` from
 the thing being paid for (a job id, an order id), never from a timestamp or
 random value — a retry must produce the same key or it charges twice.
 
@@ -1989,6 +2003,10 @@ balance is refunded and the credits are already spent:
 |---|---|
 | `REQUIRE_BALANCE` (default) | The refund is refused while the balance cannot cover the credited amount |
 | `ALLOW_NEGATIVE` | The refund goes through and the balance may go negative |
+
+A refund only takes back credits that were actually granted: if the order's
+`pay:<chargeId>` ledger entry does not exist (for example the credit failed),
+the balance is left alone and the guard does not veto.
 
 JPA persistence for the ledger:
 
@@ -2050,6 +2068,22 @@ is already registered. `TelegramBot` gains `sendInvoice`, `createInvoiceLink`,
 - The reconciler runs on its **own daemon thread**; you do not need
   `@EnableScheduling`.
 - Single instance, like the rest of the polling runtime.
+- **A refund does not change the subscription.** Refunding a subscription
+  order leaves the subscription row as it is, so access continues until
+  `expiresAt`; cancel or revoke it in your `onRefunded` listener if needed.
+- **A charge refunded before it was recorded is still recovered.** If the
+  `successful_payment` update was missed and the charge was refunded before
+  the reconciler saw it, the reconciler still records it as paid and fires
+  `onPaid` (and credits the balance). The `refunded_payment` update for an
+  unknown charge was already ignored and is not replayed, so the order stays
+  `PAID`; check refunds in your Star transaction history if this matters.
+- **`REQUIRES_NEW` writes hold a second connection.** `JpaStarOrderStore`,
+  `JpaStarSubscriptionStore` and `JpaBalanceLedger` run their idempotent
+  writes in their own transaction; called from inside a host transaction,
+  that takes a second pooled connection while the outer one is held. Size the
+  pool for it.
+- A renewal charge recovered after the user canceled extends the expiry but
+  keeps the subscription `CANCELED`.
 - Fiat providers (Click, Payme, cards) are out of scope.
 
 ## Status & roadmap
