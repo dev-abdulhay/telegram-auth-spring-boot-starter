@@ -3,6 +3,7 @@ package io.github.dev_abdulhay.telegramauth.payments;
 import org.junit.jupiter.api.Test;
 
 import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -13,12 +14,12 @@ public abstract class StarSubscriptionStoreContract {
 
     protected static StarSubscription active(String id, long userId, OffsetDateTime expiresAt) {
         return new StarSubscription(id, 1L, userId, "vip", "first-" + id, "first-" + id,
-                StarSubscriptionStatus.ACTIVE, expiresAt, OffsetDateTime.now());
+                StarSubscriptionStatus.ACTIVE, expiresAt, OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS));
     }
 
     @Test
     void savesFindsAndOverwrites() {
-        OffsetDateTime exp = OffsetDateTime.now().plusDays(30);
+        OffsetDateTime exp = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS).plusDays(30);
         store().save(active("s1", 7L, exp));
         assertThat(store().findById("s1")).isPresent();
         assertThat(store().findById("nope")).isEmpty();
@@ -32,7 +33,7 @@ public abstract class StarSubscriptionStoreContract {
 
     @Test
     void insertIfAbsentNeverTouchesAnExistingRow() {
-        OffsetDateTime exp = OffsetDateTime.now().plusDays(30);
+        OffsetDateTime exp = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS).plusDays(30);
         assertThat(store().insertIfAbsent(active("s1", 7L, exp).withStatus(StarSubscriptionStatus.CANCELED)))
                 .isTrue();
 
@@ -45,7 +46,7 @@ public abstract class StarSubscriptionStoreContract {
 
     @Test
     void extendKeepsACanceledSubscriptionCanceled() {
-        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS);
         store().save(active("s1", 7L, now).withStatus(StarSubscriptionStatus.CANCELED));
 
         assertThat(store().extend("s1", "ch2", now.plusDays(30))).isTrue();
@@ -58,7 +59,7 @@ public abstract class StarSubscriptionStoreContract {
 
     @Test
     void findByUser() {
-        OffsetDateTime exp = OffsetDateTime.now().plusDays(30);
+        OffsetDateTime exp = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS).plusDays(30);
         store().save(active("s1", 7L, exp));
         store().save(active("s2", 7L, exp));
         store().save(active("s3", 8L, exp));
@@ -70,7 +71,7 @@ public abstract class StarSubscriptionStoreContract {
 
     @Test
     void findLiveExpiringBeforeIncludesCanceledExcludesExpired() {
-        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS);
         OffsetDateTime past = now.minusHours(1);
         store().save(active("act", 7L, past));
         store().save(active("can", 7L, past).withStatus(StarSubscriptionStatus.CANCELED));
@@ -83,7 +84,7 @@ public abstract class StarSubscriptionStoreContract {
 
     @Test
     void extendOnlyMovesExpiryForward() {
-        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS);
         store().save(active("s1", 7L, now).withStatus(StarSubscriptionStatus.EXPIRED));
 
         assertThat(store().extend("s1", "ch2", now.plusDays(30))).isTrue();
@@ -99,7 +100,7 @@ public abstract class StarSubscriptionStoreContract {
 
     @Test
     void expireIfBeforeOnlyExpiresLiveAndDue() {
-        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS);
         store().save(active("due", 7L, now.minusHours(2)).withStatus(StarSubscriptionStatus.CANCELED));
         store().save(active("future", 7L, now.plusDays(1)));
 
@@ -112,7 +113,7 @@ public abstract class StarSubscriptionStoreContract {
 
     @Test
     void updateLiveStatusLeavesExpiredAndExpiryAlone() {
-        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS);
         store().save(active("s1", 7L, now.plusDays(1)));
         store().save(active("s2", 7L, now.minusDays(1)).withStatus(StarSubscriptionStatus.EXPIRED));
 
