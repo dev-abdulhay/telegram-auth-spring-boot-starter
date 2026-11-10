@@ -2,7 +2,10 @@ package com.example.demo;
 
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.payments.InMemoryStarOrderStore;
+import io.github.dev_abdulhay.telegramauth.payments.PropertiesStarCatalog;
+import io.github.dev_abdulhay.telegramauth.payments.StarCatalog;
 import io.github.dev_abdulhay.telegramauth.payments.StarOrderStore;
+import io.github.dev_abdulhay.telegramauth.payments.TelegramPaymentsProperties;
 import io.github.dev_abdulhay.telegramauth.payments.StarPaymentEvents;
 import io.github.dev_abdulhay.telegramauth.payments.StarPaymentReconciler;
 import io.github.dev_abdulhay.telegramauth.payments.StarPaymentService;
@@ -72,8 +75,38 @@ class PaymentsAutoConfigTest {
     }
 
     @Test
-    void contextClosesCleanly() {
-        enabled().run(ctx -> assertThat(ctx).hasNotFailed());
+    void contextCloseStopsReconcilerAndHandlerExecutor() {
+        StarPaymentReconciler[] rec = new StarPaymentReconciler[1];
+        StarPaymentUpdateHandler[] h = new StarPaymentUpdateHandler[1];
+        enabled().run(ctx -> {
+            rec[0] = ctx.getBean(StarPaymentReconciler.class);
+            h[0] = ctx.getBean(StarPaymentUpdateHandler.class);
+            assertThat(rec[0].isRunning()).isTrue();
+            assertThat(h[0].isShutdown()).isFalse();
+            ctx.close();
+        });
+        assertThat(rec[0].isRunning()).isFalse();
+        assertThat(h[0].isShutdown()).isTrue();
+    }
+
+    @Test
+    void invalidSettingsFailEvenWithHostCatalog() {
+        enabled().withBean(StarCatalog.class, () -> new PropertiesStarCatalog(new TelegramPaymentsProperties()))
+                .withPropertyValues("telegram.payments.pre-checkout-timeout=15s")
+                .run(ctx -> assertThat(ctx).hasFailed());
+    }
+
+    @Test
+    void tenantCustomizerWiresTenantModule() {
+        enabled().withPropertyValues("telegram.white-label.enabled=true").run(ctx -> {
+            TelegramBotModule tenant = TelegramBotModule.builder("9:XYZ", "tenant_bot").botUserId(777L).build();
+            var bot = new io.github.dev_abdulhay.telegramauth.managedbots.ManagedBot(
+                    777L, "tenant_bot", "T", 1L, "enc", null, null);
+            ctx.getBean(ManagedBotCustomizer.class).customize(tenant, bot);
+            assertThat(tenant.getPreCheckoutHandler()).isNotNull();
+            assertThat(tenant.getCommands()).containsKey("/paysupport");
+            assertThat(ctx.getBean(StarPaymentService.class).tenantBots()).containsKey(777L);
+        });
     }
 
     @Test

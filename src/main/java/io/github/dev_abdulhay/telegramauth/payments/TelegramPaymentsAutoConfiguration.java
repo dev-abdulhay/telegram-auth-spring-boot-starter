@@ -3,6 +3,7 @@ package io.github.dev_abdulhay.telegramauth.payments;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.config.TelegramAuthAutoConfiguration;
 import io.github.dev_abdulhay.telegramauth.whitelabel.ManagedBotCustomizer;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -23,10 +24,15 @@ import java.time.Clock;
 @EnableConfigurationProperties(TelegramPaymentsProperties.class)
 public class TelegramPaymentsAutoConfiguration {
 
+    /** Fails startup on invalid settings even when the host supplies its own catalog. */
+    @Bean
+    public InitializingBean starPaymentsPropertiesValidation(TelegramPaymentsProperties properties) {
+        return properties::validate;
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public StarCatalog starCatalog(TelegramPaymentsProperties properties) {
-        properties.validate();
         return new PropertiesStarCatalog(properties);
     }
 

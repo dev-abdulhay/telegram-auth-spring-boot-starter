@@ -59,6 +59,11 @@ public class StarPaymentUpdateHandler {
         validationExecutor.shutdownNow();
     }
 
+    /** Whether {@link #shutdown()} has stopped the validation executor. */
+    public boolean isShutdown() {
+        return validationExecutor.isShutdown();
+    }
+
     /** Claims the pre-checkout, successful-payment and refunded-payment hooks of {@code module}. */
     public void register(TelegramBotModule module) {
         Long botId = service.botIdOf(module);
