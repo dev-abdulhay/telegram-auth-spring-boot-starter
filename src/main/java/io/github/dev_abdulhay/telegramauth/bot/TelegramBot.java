@@ -203,12 +203,9 @@ public class TelegramBot {
 
     /** Invoice form fields shared by sendInvoice/createInvoiceLink: XTR, empty provider token, one price. */
     private static String invoiceFields(String title, String description, String payload, int stars) {
-        String prices;
-        try {
-            prices = MAPPER.writeValueAsString(List.of(java.util.Map.of("label", title, "amount", stars)));
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new IllegalStateException(e);
-        }
+        com.fasterxml.jackson.databind.node.ArrayNode arr = MAPPER.createArrayNode();
+        arr.addObject().put("label", title).put("amount", stars);
+        String prices = arr.toString();
         return "title=" + enc(title) + "&description=" + enc(description) + "&payload=" + enc(payload)
                 + "&currency=XTR&provider_token=&prices=" + enc(prices);
     }

@@ -46,7 +46,7 @@ class StarPaymentsApiTest {
     }
 
     @Test
-    void sendInvoiceSendsXtrAndSinglePrice() {
+    void sendInvoiceSendsXtrAndSinglePrice() throws Exception {
         stub("sendInvoice", "{\"ok\":true,\"result\":{\"message_id\":7}}");
 
         assertThat(bot.sendInvoice(55L, "Pack", "Desc", "so:abc", 100).get("message_id").asInt()).isEqualTo(7);
@@ -55,7 +55,9 @@ class StarPaymentsApiTest {
         assertThat(body).contains("chat_id=55").contains("currency=XTR").contains("payload=so%3Aabc");
         assertThat(body).containsPattern("provider_token=(&|$)");
         String prices = URLDecoder.decode(body.replaceAll(".*prices=([^&]*).*", "$1"), StandardCharsets.UTF_8);
-        assertThat(prices).isEqualTo("[{\"label\":\"Pack\",\"amount\":100}]");
+        assertThat(new com.fasterxml.jackson.databind.ObjectMapper().readTree(prices))
+                .isEqualTo(new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readTree("[{\"label\":\"Pack\",\"amount\":100}]"));
     }
 
     @Test
