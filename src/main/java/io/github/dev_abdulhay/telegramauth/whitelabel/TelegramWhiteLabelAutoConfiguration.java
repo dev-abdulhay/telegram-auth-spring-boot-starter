@@ -15,6 +15,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Primary;
 
+import java.util.List;
 import java.util.concurrent.ThreadFactory;
 
 /**
@@ -56,7 +57,11 @@ public class TelegramWhiteLabelAutoConfiguration {
                     "a TenantBotFactory bean is required when telegram.white-label.enabled=true; "
                             + "only the host can build a session service for its own entity types");
         }
-        return new TenantBotRegistry<>(managedBots, f, customizer.getIfAvailable(),
+        List<ManagedBotCustomizer> all = customizer.orderedStream().toList();
+        ManagedBotCustomizer composed = all.isEmpty() ? null
+                : all.size() == 1 ? all.get(0)
+                : (module, bot) -> all.forEach(c -> c.customize(module, bot));
+        return new TenantBotRegistry<>(managedBots, f, composed,
                 threadFactory.getIfAvailable(), properties.getPollFailureBudget());
     }
 

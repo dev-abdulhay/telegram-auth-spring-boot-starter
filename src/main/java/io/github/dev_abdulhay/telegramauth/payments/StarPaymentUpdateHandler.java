@@ -54,6 +54,11 @@ public class StarPaymentUpdateHandler {
         });
     }
 
+    /** Stops the pre-checkout validation threads; called by Spring on context close. */
+    public void shutdown() {
+        validationExecutor.shutdownNow();
+    }
+
     /** Claims the pre-checkout, successful-payment and refunded-payment hooks of {@code module}. */
     public void register(TelegramBotModule module) {
         Long botId = service.botIdOf(module);
