@@ -17,6 +17,7 @@ import java.lang.reflect.Proxy;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -53,7 +54,7 @@ class JpaStarSubscriptionStoreTest extends StarSubscriptionStoreContract {
 
     @Test
     void firstChargeIdIsUnique() {
-        OffsetDateTime exp = OffsetDateTime.now().plusDays(30);
+        OffsetDateTime exp = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS).plusDays(30);
         store.save(active("s1", 7L, exp));
 
         assertThatThrownBy(() -> store.save(new io.github.dev_abdulhay.telegramauth.payments.StarSubscription(
@@ -70,7 +71,7 @@ class JpaStarSubscriptionStoreTest extends StarSubscriptionStoreContract {
      */
     @Test
     void rowCommittedAfterTheExistenceCheckIsNotOverwritten() {
-        OffsetDateTime exp = OffsetDateTime.now().plusDays(30);
+        OffsetDateTime exp = OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS).plusDays(30);
         store.insertIfAbsent(active("s1", 7L, exp));
         store.updateLiveStatus("s1", StarSubscriptionStatus.CANCELED);
         AtomicBoolean stale = new AtomicBoolean(true);
