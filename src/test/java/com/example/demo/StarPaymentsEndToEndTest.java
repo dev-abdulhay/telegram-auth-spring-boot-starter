@@ -111,6 +111,16 @@ class StarPaymentsEndToEndTest {
         }
     }
 
+    /** Host guard that vetoes with {@link #VETO} when set, otherwise allows. */
+    @TestConfiguration
+    static class HostGuard {
+        static final java.util.concurrent.atomic.AtomicReference<String> VETO =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        @Bean StarRefundGuard hostGuard() {
+            return order -> java.util.Optional.ofNullable(VETO.get());
+        }
+    }
+
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(TelegramPaymentsAutoConfiguration.class,
                     TelegramPaymentsBalanceAutoConfiguration.class))
@@ -239,6 +249,63 @@ class StarPaymentsEndToEndTest {
             assertThat(ctx).hasSingleBean(BalanceLedger.class);
             assertThat(ctx.getBean(BalanceLedger.class)).isSameAs(HostLedger.LEDGER);
             assertThat(ctx.getBean(StarRefundGuard.class)).isSameAs(ctx.getBean(TopUpCreditor.class));
+        });
+    }
+
+    private static StarOrder paidTopUp(TelegramBotModule main, StarPaymentService service, String charge) {
+        StarOrder order = service.sendTopUpInvoice(USER, USER, 100);
+        dispatch(main, preCheckout("q-" + charge, order.payload(), 100));
+        dispatch(main, payment(order.payload(), charge, 100));
+        return order;
+    }
+
+    @Test
+    void hostGuardVetoIsHonouredAlongsideTheCreditor() {
+        balance().withUserConfiguration(HostGuard.class).run(ctx -> {
+            assertThat(ctx).hasNotFailed();
+            StarPaymentService service = ctx.getBean(StarPaymentService.class);
+            TelegramBotModule main = ctx.getBean(TelegramBotModule.class);
+            StarOrder order = paidTopUp(main, service, "ch-h");
+            HostGuard.VETO.set("support ticket open");
+            try {
+                assertThatThrownBy(() -> service.refund(order.id()))
+                        .isInstanceOf(StarPaymentException.class)
+                        .hasMessageContaining("support ticket open");
+            } finally {
+                HostGuard.VETO.set(null);
+            }
+            assertThat(((RecordingBot) main.getBot()).refunds).isEmpty();
+            assertThat(ctx.getBean(BalanceLedger.class).balance(new BalanceAccountKey(null, USER))).isEqualTo(100);
+        });
+    }
+
+    @Test
+    void creditorStillVetoesSpentCreditsWhenHostGuardAllows() {
+        balance().withUserConfiguration(HostGuard.class).run(ctx -> {
+            StarPaymentService service = ctx.getBean(StarPaymentService.class);
+            TelegramBotModule main = ctx.getBean(TelegramBotModule.class);
+            BalanceLedger ledger = ctx.getBean(BalanceLedger.class);
+            StarOrder order = paidTopUp(main, service, "ch-s");
+            ledger.debit(new BalanceAccountKey(null, USER), 1, "spend:1", "spend");
+
+            assertThatThrownBy(() -> service.refund(order.id()))
+                    .isInstanceOf(StarPaymentException.class)
+                    .hasMessageContaining("Credits from this payment were already spent");
+            assertThat(((RecordingBot) main.getBot()).refunds).isEmpty();
+        });
+    }
+
+    @Test
+    void allowingGuardsLetTheRefundThrough() {
+        balance().withUserConfiguration(HostGuard.class).run(ctx -> {
+            StarPaymentService service = ctx.getBean(StarPaymentService.class);
+            TelegramBotModule main = ctx.getBean(TelegramBotModule.class);
+            StarOrder order = paidTopUp(main, service, "ch-a");
+
+            service.refund(order.id());
+
+            assertThat(((RecordingBot) main.getBot()).refunds).containsExactly(USER + ":ch-a");
+            assertThat(ctx.getBean(BalanceLedger.class).balance(new BalanceAccountKey(null, USER))).isZero();
         });
     }
 

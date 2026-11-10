@@ -18,6 +18,7 @@ import java.time.Clock;
  *
  * <p>The host supplies the {@link TelegramBotModule}; every {@link StarPaymentEvents} bean
  * is combined into one composite handed to the service, so the composite itself is not a bean.
+ * Every {@link StarRefundGuard} bean is likewise combined in order; the first veto wins.
  */
 @AutoConfiguration(after = TelegramAuthAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "telegram.payments", name = "enabled", havingValue = "true")
@@ -56,7 +57,8 @@ public class TelegramPaymentsAutoConfiguration {
                                                  ObjectProvider<StarPaymentEvents> events,
                                                  TelegramPaymentsProperties properties,
                                                  ObjectProvider<Clock> clock) {
-        return new StarPaymentService(requireModule(module), catalog, orders, subs, guard.getIfAvailable(),
+        return new StarPaymentService(requireModule(module), catalog, orders, subs,
+                CompositeStarRefundGuard.of(guard.orderedStream().toList()),
                 new CompositeStarPaymentEvents(events.orderedStream().toList()), properties,
                 clock.getIfAvailable(Clock::systemUTC));
     }
