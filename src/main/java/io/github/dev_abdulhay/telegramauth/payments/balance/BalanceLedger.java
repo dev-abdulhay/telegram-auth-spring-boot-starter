@@ -4,7 +4,7 @@ import java.util.List;
 
 /**
  * Internal credit balance per {@link BalanceAccountKey}. Every change carries a globally unique
- * {@code refKey} (max 160 chars): reusing one returns {@code applied=false} with the current
+ * {@code refKey} (max 600 chars): reusing one returns {@code applied=false} with the current
  * balance and changes nothing, even if the amount differs, so callers can retry safely.
  * {@code amount} must be positive; {@code reason} is at most 64 chars.
  */

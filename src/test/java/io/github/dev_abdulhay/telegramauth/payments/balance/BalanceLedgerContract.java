@@ -22,6 +22,21 @@ public abstract class BalanceLedgerContract {
     protected abstract BalanceLedger ledger();
 
     @Test
+    void acceptsRefKeysBuiltFromRealisticTelegramChargeIds() {
+        // real charge ids are ~200 chars; TopUpCreditor prefixes them with "pay:" / "refund:"
+        String chargeId = "stxCh_" + "Ab9-".repeat(50).substring(0, 194);
+        String pay = "pay:" + chargeId;
+        String refund = "refund:" + chargeId;
+
+        assertThat(ledger().credit(ACC, 10, pay, "x").applied()).isTrue();
+        assertThat(ledger().debit(ACC, 4, refund, "x").applied()).isTrue();
+
+        assertThat(ledger().hasEntry(pay)).isTrue();
+        assertThat(ledger().hasEntry(refund)).isTrue();
+        assertThat(ledger().balance(ACC)).isEqualTo(6);
+    }
+
+    @Test
     void hasEntryReportsOnlyAppliedRefKeys() {
         assertThat(ledger().hasEntry("pay:c1")).isFalse();
         ledger().credit(ACC, 100, "pay:c1", "TOP_UP:pack");
@@ -160,7 +175,7 @@ public abstract class BalanceLedgerContract {
         assertThatThrownBy(() -> ledger().debitAllowNegative(ACC, 0, "r", "x"))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> ledger().credit(ACC, 1, " ", "x")).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> ledger().credit(ACC, 1, "r".repeat(161), "x"))
+        assertThatThrownBy(() -> ledger().credit(ACC, 1, "r".repeat(601), "x"))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> ledger().credit(ACC, 1, "r", "x".repeat(65)))
                 .isInstanceOf(IllegalArgumentException.class);
