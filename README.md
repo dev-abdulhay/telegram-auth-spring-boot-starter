@@ -64,14 +64,14 @@ for free; override a method to change the behaviour.
 <dependency>
     <groupId>io.github.dev-abdulhay</groupId>
     <artifactId>telegram-auth-spring-boot-starter</artifactId>
-    <version>0.6.0</version>
+    <version>0.6.1</version>
 </dependency>
 ```
 
 **Gradle (Kotlin DSL):**
 
 ```kotlin
-implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.6.0")
+implementation("io.github.dev-abdulhay:telegram-auth-spring-boot-starter:0.6.1")
 ```
 
 Then enable the starter:
@@ -83,6 +83,10 @@ telegram:
     cleanup-cron: "0 */5 * * * *"  # optional — expired-session sweep schedule
 ```
 
+> **Upgrading from 0.6.0 with Stars payments on JPA?** Widen the charge id
+> columns, or real payments are taken but never recorded. See
+> [Upgrading to 0.6.1](#upgrading-to-061).
+>
 > **Upgrading from 0.4.x?** 0.5.0 adds one column to the session table and every
 > host must apply it, whether or not it uses the new features. See
 > [Upgrading to 0.5.0](#upgrading-to-050).
@@ -545,6 +549,42 @@ plus optional `bot(…)` / `eventBus(…)` overrides.
 > confirmation step **widens this window**: an entry must now survive from the
 > contact step all the way to the final number, rather than to ✅. Override the
 > `on*` methods with a shared store if a mid-flow handover has to survive intact.
+
+## Upgrading to 0.6.1
+
+Only hosts that persist Stars payments with JPA and **their own migrations**
+(Flyway, Liquibase, hand-written DDL) need to act; `ddl-auto` hosts get the new
+widths from the entity mappings, in-memory hosts need nothing.
+
+0.6.0 mapped the Telegram charge id to `varchar(128)`, but real
+`telegram_payment_charge_id` values are longer (around 200 characters). On a
+128-wide column the `successful_payment` UPDATE failed and the order was left
+unpaid, while Telegram had already taken the Stars. 0.6.1 maps them to 512 and
+no longer turns that failure into a silent `false`: it is logged at ERROR and
+rethrown, so the reconciler keeps retrying the charge once the schema is fixed.
+
+Widen these columns (PostgreSQL syntax; substitute your table names):
+
+```sql
+ALTER TABLE star_order        ALTER COLUMN charge_id       TYPE VARCHAR(512);
+ALTER TABLE star_subscription ALTER COLUMN first_charge_id TYPE VARCHAR(512);
+ALTER TABLE star_subscription ALTER COLUMN last_charge_id  TYPE VARCHAR(512);
+-- only with the balance ledger (telegram.payments.balance.enabled=true):
+ALTER TABLE ledger_entry      ALTER COLUMN ref_key         TYPE VARCHAR(600);
+```
+
+MySQL: `ALTER TABLE star_order MODIFY charge_id VARCHAR(512);` and so on (keep
+`NOT NULL` on `ref_key`). The `UNIQUE` constraints and primary keys stay as they
+are. The ledger's `ref_key` is `"pay:"` / `"refund:"` + the charge id, so its
+limit rose from 160 to 600 as well: with a real charge id, 0.6.0 refused the
+ledger write and **top-up credits were never granted**, on every store.
+
+Payments that hit this on 0.6.0 are still in Telegram: after migrating, the
+reconciler records them on its next run (its cursor is in memory, so a restart
+rescans from the start), as long as the order row still exists. Expired orders
+are purged after `telegram.payments.order-retention`; a charge whose order is
+gone is only logged as "matches no order" and has to be settled by hand
+(credit the user, or refund the charge with `TelegramBot.refundStarPayment`).
 
 ## Upgrading to 0.5.0
 
@@ -1953,6 +1993,12 @@ order, a new subscription row) run in their own `REQUIRES_NEW` transaction.
 > create constraints under `spring.jpa.hibernate.ddl-auto`. With your own
 > migrations, create them yourself — idempotency depends on them:
 >
+> - **column widths**: `charge_id`, `first_charge_id` and `last_charge_id` at
+>   least `varchar(512)` (or `text`), and the ledger's `ref_key` at least
+>   `varchar(600)`. Real Telegram charge ids are longer than 128 characters
+>   (around 200 in practice); on a narrower column a paid order cannot be
+>   recorded, so the buyer is charged and never served. The store logs that at
+>   ERROR and throws, but only a wide enough column fixes it;
 > - `UNIQUE (charge_id)` on the order table (renewals are deduplicated by it);
 > - `UNIQUE (first_charge_id)` on the subscription table;
 > - the primary keys: `id` on both tables and, with the ledger, `account_key` on

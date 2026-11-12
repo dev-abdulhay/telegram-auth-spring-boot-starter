@@ -37,10 +37,10 @@ public abstract class BaseStarSubscription implements Persistable<String> {
     @Column(name = "product_code", length = 64)
     private String productCode;
 
-    @Column(name = "first_charge_id", length = 128, unique = true)
+    @Column(name = "first_charge_id", length = 512, unique = true)
     private String firstChargeId;
 
-    @Column(name = "last_charge_id", length = 128)
+    @Column(name = "last_charge_id", length = 512)
     private String lastChargeId;
 
     @Enumerated(EnumType.STRING)

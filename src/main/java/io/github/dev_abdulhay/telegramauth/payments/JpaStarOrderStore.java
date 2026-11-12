@@ -1,5 +1,8 @@
 package io.github.dev_abdulhay.telegramauth.payments;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.NestedExceptionUtils;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -19,6 +22,8 @@ import java.util.function.Supplier;
  * @param <O> the host's concrete {@link BaseStarOrder} entity
  */
 public class JpaStarOrderStore<O extends BaseStarOrder> implements StarOrderStore {
+
+    private static final Logger log = LoggerFactory.getLogger(JpaStarOrderStore.class);
 
     private final BaseStarOrderRepository<O> repo;
     private final Supplier<O> factory;
@@ -58,6 +63,11 @@ public class JpaStarOrderStore<O extends BaseStarOrder> implements StarOrderStor
      * The write runs in its own transaction and the unique-constraint violation is caught
      * <em>outside</em> it: catching inside would leave the transaction rollback-only and the
      * commit would throw. A charge id already stored on another order yields {@code false}.
+     * Any other integrity failure (a column too narrow for the charge id, a NOT NULL) is
+     * logged at ERROR and rethrown: swallowing it would lose the payment silently.
+     *
+     * @throws DataIntegrityViolationException when the write fails for any reason other than a
+     *         duplicate charge id
      */
     @Override
     public boolean markPaid(String id, String chargeId, OffsetDateTime at) {
@@ -65,11 +75,11 @@ public class JpaStarOrderStore<O extends BaseStarOrder> implements StarOrderStor
             return Boolean.TRUE.equals(isolated.execute(status -> repo.markPaid(id, chargeId, at,
                     List.of(StarOrderStatus.CREATED, StarOrderStatus.EXPIRED), StarOrderStatus.PAID) == 1));
         } catch (DataIntegrityViolationException e) {
-            return false;
+            return duplicateCharge(chargeId, id, e);
         }
     }
 
-    /** Same transaction handling as {@link #markPaid}. */
+    /** Same transaction and error handling as {@link #markPaid}. */
     @Override
     public boolean insertPaidIfChargeAbsent(StarOrder paid) {
         try {
@@ -83,8 +93,23 @@ public class JpaStarOrderStore<O extends BaseStarOrder> implements StarOrderStor
                 return true;
             }));
         } catch (DataIntegrityViolationException e) {
+            return duplicateCharge(paid.chargeId(), paid.id(), e);
+        }
+    }
+
+    /**
+     * Decides what a failed write meant, outside the rolled-back transaction: {@code false} when
+     * the charge id is now stored (the unique constraint fired), otherwise rethrows.
+     */
+    private boolean duplicateCharge(String chargeId, String orderId, DataIntegrityViolationException e) {
+        if (chargeId != null && repo.findByChargeId(chargeId).isPresent()) {
             return false;
         }
+        log.error("Recording Stars charge {} (length {}) on order {} failed: {}. Check the star_order schema "
+                        + "(charge_id must be at least varchar(512))", chargeId,
+                chargeId == null ? 0 : chargeId.length(), orderId,
+                NestedExceptionUtils.getMostSpecificCause(e).getMessage());
+        throw e;
     }
 
     @Override

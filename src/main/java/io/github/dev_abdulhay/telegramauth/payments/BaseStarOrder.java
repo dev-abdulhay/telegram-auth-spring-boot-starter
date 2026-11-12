@@ -46,7 +46,7 @@ public abstract class BaseStarOrder {
     @Column(name = "status", length = 16, nullable = false)
     private StarOrderStatus status;
 
-    @Column(name = "charge_id", length = 128, unique = true)
+    @Column(name = "charge_id", length = 512, unique = true)
     private String chargeId;
 
     @Column(name = "subscription_id", length = 32)

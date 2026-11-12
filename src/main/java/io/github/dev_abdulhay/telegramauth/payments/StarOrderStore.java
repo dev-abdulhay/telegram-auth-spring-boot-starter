@@ -17,10 +17,17 @@ public interface StarOrderStore {
 
     Optional<StarOrder> findByChargeId(String chargeId);
 
-    /** {@code CREATED|EXPIRED -> PAID}; true only if this call made the transition. */
+    /**
+     * {@code CREATED|EXPIRED -> PAID}; true only if this call made the transition. A charge id
+     * already stored on another order is a {@code false}; any other storage failure must throw,
+     * never become {@code false}, or the payment is lost without a trace.
+     */
     boolean markPaid(String id, String chargeId, OffsetDateTime at);
 
-    /** Inserts a renewal order that is already paid; false if its charge id is already stored. */
+    /**
+     * Inserts a renewal order that is already paid; false if its charge id is already stored.
+     * Other storage failures throw, as in {@link #markPaid}.
+     */
     boolean insertPaidIfChargeAbsent(StarOrder paid);
 
     /** True only if the order is {@code PAID} and not yet fulfilled. */

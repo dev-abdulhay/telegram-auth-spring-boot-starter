@@ -3,7 +3,7 @@ package io.github.dev_abdulhay.telegramauth.payments.balance;
 /** Argument checks shared by the ledger implementations. */
 final class LedgerArgs {
 
-    static final int MAX_REF_KEY = 160;
+    static final int MAX_REF_KEY = 600;
     static final int MAX_REASON = 64;
 
     private LedgerArgs() {
