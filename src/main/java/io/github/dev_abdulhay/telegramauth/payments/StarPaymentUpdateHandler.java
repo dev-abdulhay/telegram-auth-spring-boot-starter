@@ -109,9 +109,15 @@ public class StarPaymentUpdateHandler {
             return false;
         }
         if (!orders.markPaid(order.id(), chargeId, now)) {
-            if (orders.findByChargeId(chargeId).isEmpty()) {
-                log.error("Stars charge {} could not be recorded on order {} in status {}; needs manual review",
-                        chargeId, order.id(), order.status());
+            // a schema failure is not a false here: the store rethrows it, and the caller logs it
+            StarOrder holder = orders.findByChargeId(chargeId).orElse(null);
+            if (holder == null) {
+                String status = orders.findById(order.id()).map(o -> String.valueOf(o.status())).orElse("missing");
+                log.error("Stars charge {} could not be recorded on order {}: order is {}, only CREATED or EXPIRED "
+                        + "can be paid; needs manual review", chargeId, order.id(), status);
+            } else if (!holder.id().equals(order.id())) {
+                log.error("Stars charge {} could not be recorded on order {}: already recorded on order {}; "
+                        + "needs manual review", chargeId, order.id(), holder.id());
             }
             return false;
         }

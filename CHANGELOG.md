@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-11
+
+Hosts on JPA with their own migrations must widen four columns; see
+[Upgrading to 0.6.1](README.md#upgrading-to-061).
+
+### Fixed
+- **Stars payments were lost with real Telegram charge ids.** `BaseStarOrder.chargeId`
+  and `BaseStarSubscription.firstChargeId` / `lastChargeId` were `varchar(128)`, but
+  real `telegram_payment_charge_id` values are ~200 characters. Recording the
+  `successful_payment` failed, the order stayed unpaid and later expired, and the
+  reconciler failed the same way on every run. The columns are now 512.
+- **Top-up credits were never granted with real charge ids.** Ledger refKeys
+  (`"pay:"` / `"refund:"` + charge id) were capped at 160 characters, so the credit
+  was rejected on every ledger, in-memory included. The cap and `ref_key` column are
+  now 600.
+- **Storage failures are no longer swallowed.** `JpaStarOrderStore.markPaid` and
+  `insertPaidIfChargeAbsent` return `false` only for a charge id that is already
+  stored; any other integrity failure (value too long, NOT NULL, …) is logged at
+  ERROR with the charge id and cause, then rethrown, so the reconciler keeps
+  retrying it. The "needs manual review" log of `completePayment` now says why
+  (the order's current status, or the order that already holds the charge).
+
 ## [0.6.0] - 2026-11-10
 
 Telegram Stars payments, with an optional credits ledger. Both are off by
