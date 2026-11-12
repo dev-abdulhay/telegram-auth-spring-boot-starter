@@ -23,7 +23,7 @@ public abstract class BaseLedgerEntry implements Persistable<String> {
     private boolean newEntity = true;
 
     @Id
-    @Column(name = "ref_key", length = 160, nullable = false)
+    @Column(name = "ref_key", length = 600, nullable = false)
     private String refKey;
 
     @Column(name = "account_key", length = 48, nullable = false)

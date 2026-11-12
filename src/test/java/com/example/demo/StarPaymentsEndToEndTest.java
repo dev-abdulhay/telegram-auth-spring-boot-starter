@@ -48,6 +48,15 @@ class StarPaymentsEndToEndTest {
     static final ObjectMapper MAPPER = new ObjectMapper();
     static final long USER = 42L;
 
+    /**
+     * A charge id as long as real Telegram ones (~200 chars, well past the 128 that 0.6.0's
+     * columns allowed), so a too-narrow column or ref-key limit fails here.
+     */
+    static String charge(String tag) {
+        String id = "stxCh" + tag + "_";
+        return id + "Ab9-".repeat(50).substring(0, 200 - id.length());
+    }
+
     /** Records the payment API calls instead of hitting Telegram. */
     static class RecordingBot extends TelegramBot {
         final List<String> payloads = new CopyOnWriteArrayList<>();
@@ -173,13 +182,13 @@ class StarPaymentsEndToEndTest {
             dispatch(main, preCheckout("q1", order.payload(), 100));
             assertThat(bot.answers).containsExactly("q1:true");
 
-            dispatch(main, payment(order.payload(), "ch-1", 100));
-            dispatch(main, payment(order.payload(), "ch-1", 100));
+            dispatch(main, payment(order.payload(), charge("1"), 100));
+            dispatch(main, payment(order.payload(), charge("1"), 100));
             assertThat(ledger.balance(key)).isEqualTo(100);
             assertThat(ledger.history(key, 0, 10)).hasSize(1);
 
             service.refund(order.id());
-            assertThat(bot.refunds).containsExactly(USER + ":ch-1");
+            assertThat(bot.refunds).containsExactly(USER + ":" + charge("1"));
             assertThat(ledger.balance(key)).isZero();
         });
     }
@@ -193,7 +202,7 @@ class StarPaymentsEndToEndTest {
             BalanceAccountKey key = new BalanceAccountKey(null, USER);
             StarOrder order = service.sendTopUpInvoice(USER, USER, 100);
             dispatch(main, preCheckout("q1", order.payload(), 100));
-            dispatch(main, payment(order.payload(), "ch-1", 100));
+            dispatch(main, payment(order.payload(), charge("1"), 100));
             ledger.debit(key, 30, "spend:1", "spend");
 
             assertThatThrownBy(() -> service.refund(order.id()))
@@ -219,7 +228,7 @@ class StarPaymentsEndToEndTest {
             assertThat(tenantBot.payloads).containsExactly(order.payload());
             dispatch(tenant, preCheckout("q7", order.payload(), 50));
             assertThat(tenantBot.answers).containsExactly("q7:true");
-            dispatch(tenant, payment(order.payload(), "ch-7", 50));
+            dispatch(tenant, payment(order.payload(), charge("7"), 50));
 
             assertThat(ledger.balance(new BalanceAccountKey(777L, USER))).isEqualTo(50);
             assertThat(ledger.balance(new BalanceAccountKey(null, USER))).isZero();
@@ -265,7 +274,7 @@ class StarPaymentsEndToEndTest {
             assertThat(ctx).hasNotFailed();
             StarPaymentService service = ctx.getBean(StarPaymentService.class);
             TelegramBotModule main = ctx.getBean(TelegramBotModule.class);
-            StarOrder order = paidTopUp(main, service, "ch-h");
+            StarOrder order = paidTopUp(main, service, charge("h"));
             HostGuard.VETO.set("support ticket open");
             try {
                 assertThatThrownBy(() -> service.refund(order.id()))
@@ -285,7 +294,7 @@ class StarPaymentsEndToEndTest {
             StarPaymentService service = ctx.getBean(StarPaymentService.class);
             TelegramBotModule main = ctx.getBean(TelegramBotModule.class);
             BalanceLedger ledger = ctx.getBean(BalanceLedger.class);
-            StarOrder order = paidTopUp(main, service, "ch-s");
+            StarOrder order = paidTopUp(main, service, charge("s"));
             ledger.debit(new BalanceAccountKey(null, USER), 1, "spend:1", "spend");
 
             assertThatThrownBy(() -> service.refund(order.id()))
@@ -300,11 +309,11 @@ class StarPaymentsEndToEndTest {
         balance().withUserConfiguration(HostGuard.class).run(ctx -> {
             StarPaymentService service = ctx.getBean(StarPaymentService.class);
             TelegramBotModule main = ctx.getBean(TelegramBotModule.class);
-            StarOrder order = paidTopUp(main, service, "ch-a");
+            StarOrder order = paidTopUp(main, service, charge("a"));
 
             service.refund(order.id());
 
-            assertThat(((RecordingBot) main.getBot()).refunds).containsExactly(USER + ":ch-a");
+            assertThat(((RecordingBot) main.getBot()).refunds).containsExactly(USER + ":" + charge("a"));
             assertThat(ctx.getBean(BalanceLedger.class).balance(new BalanceAccountKey(null, USER))).isZero();
         });
     }
