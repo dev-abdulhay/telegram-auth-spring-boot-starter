@@ -53,7 +53,7 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
 
     protected final AbstractSessionService<U, S> sessionService;
     protected final TelegramBotModule module;
-    /** {@code null} for a controller built with the two-argument constructor: {@code /miniapp} then answers 404. */
+    /** {@code null} for a controller built with the two-argument constructor: {@code miniAppLogin(...)} then returns 404. */
     protected final AbstractTelegramUserService<U> userService;
     private MiniAppLoginService<U> miniAppLoginService;
 

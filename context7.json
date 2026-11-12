@@ -11,7 +11,7 @@
     "Give every user type its own TelegramBotModule and pass it explicitly to that type's session service, controller and flow.",
     "Index ip_address on each auth-session table, because every POST /session counts pending sessions per IP.",
     "When upgrading from 0.4.x to 0.5.0, add the nullable host_ref VARCHAR(128) column to every auth-session table.",
-    "Mini App login is opt-in: call .miniApp(MiniAppOptions.defaults()) on the TelegramBotModule builder use the 3-arg AbstractTelegramAuthController constructor (sessionService, module, userService), and map the route in your subclass: @PostMapping(\"/miniapp\") public ResponseEntity<?> miniApp(@RequestBody(required = false) Map<String, Object> body, HttpServletRequest req) { return miniAppLogin(body, req); }. The base class maps nothing, so upgrading adds no route. The endpoint takes {\"initData\": \"...\"}.",
+    "Mini App login is opt-in: call .miniApp(MiniAppOptions.defaults()) on the TelegramBotModule builder and use the 3-arg AbstractTelegramAuthController constructor (sessionService, module, userService), and map the route in your subclass: @PostMapping(\"/miniapp\") public ResponseEntity<?> miniApp(@RequestBody(required = false) Map<String, Object> body, HttpServletRequest req) { return miniAppLogin(body, req); }. The base class maps nothing, so upgrading adds no route. The endpoint takes {\"initData\": \"...\"}.",
     "Run a single application instance: the transport is long polling and the event bus is in memory."
   ]
 }

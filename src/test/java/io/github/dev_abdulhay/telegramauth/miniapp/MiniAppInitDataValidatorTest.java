@@ -159,7 +159,13 @@ class MiniAppInitDataValidatorTest {
 
     @Test
     void badPercentEscapeIsInvalid() {
-        assertError("start_param=%zz&" + MiniAppTestSigner.sign(TOKEN, fields(NOW)), MiniAppError.INIT_DATA_INVALID);
+        // The literal "%zz" is part of the SIGNED data, so the hash matches a lenient decoder:
+        // the only possible reason for INIT_DATA_INVALID is the failed percent-decoding.
+        Map<String, String> f = fields(NOW);
+        f.put("start_param", "%zz");
+        String raw = MiniAppTestSigner.sign(TOKEN, f).replace("start_param=%25zz", "start_param=%zz");
+        assertThat(raw).contains("start_param=%zz&");
+        assertError(raw, MiniAppError.INIT_DATA_INVALID);
     }
 
     @Test

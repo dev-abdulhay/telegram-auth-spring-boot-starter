@@ -1791,19 +1791,35 @@ yourself:
    every tenant).
 
 ```java
-private final Map<Long, MiniAppLoginService<TenantUser>> miniAppLogins = new ConcurrentHashMap<>();
+@Configuration
+class TenantMiniAppConfig {
 
-// add `InitDataReplayStore replayStore` (the auto-configured bean) to the factory
-// method's parameters; then, inside the lambda, after building `module`:
-miniAppLogins.put(bot.botUserId(),
-        new MiniAppLoginService<>(module, users, replayStore, Clock.systemUTC()));
+    // Exposed as a bean so the tenant controller can reach it.
+    @Bean
+    Map<Long, MiniAppLoginService<TenantUser>> miniAppLogins() {
+        return new ConcurrentHashMap<>();
+    }
+
+    // add `InitDataReplayStore replayStore` (the auto-configured bean) and the
+    // `miniAppLogins` map to the factory method's parameters; then, inside the
+    // lambda, after building `module`:
+    //
+    // miniAppLogins.put(bot.botUserId(),
+    //         new MiniAppLoginService<>(module, users, replayStore, Clock.systemUTC()));
+}
 ```
 
-In your tenant controller, resolve the tenant as for bot login and call
-`login(initData, ip, userAgent, hostRef)` on that tenant's service. Map
+In your tenant controller, inject the map, resolve the tenant as for bot login
+and call `login(initData, ip, userAgent, hostRef)` on that tenant's service. Map
 `MiniAppAuthException` yourself, or every Mini App error turns into a `500`:
 
 ```java
+private final Map<Long, MiniAppLoginService<TenantUser>> miniAppLogins;
+
+TenantAuthController(/* ...existing args, */ Map<Long, MiniAppLoginService<TenantUser>> miniAppLogins) {
+    this.miniAppLogins = miniAppLogins;
+}
+
 @ExceptionHandler(MiniAppAuthException.class)
 ResponseEntity<Map<String, String>> onMiniAppAuthFailed(MiniAppAuthException e) {
     return ResponseEntity.status(e.error().httpStatus()).body(Map.of("error", e.error().code()));
