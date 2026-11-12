@@ -20,7 +20,7 @@ import java.util.TreeMap;
 /**
  * Verifies Telegram Mini App initData as described in
  * <a href="https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app">the Bot API docs</a>:
- * HMAC-SHA256 over the sorted {@code key=value} lines (minus {@code hash} and {@code signature}), keyed by
+ * HMAC-SHA256 over the sorted {@code key=value} lines (every field except {@code hash}, {@code signature} included), keyed by
  * {@code HMAC_SHA256("WebAppData", botToken)}, then a freshness check on {@code auth_date}.
  *
  * <p>Stateless and thread-safe. Every rejection is a {@link MiniAppAuthException}.
@@ -77,7 +77,7 @@ public final class MiniAppInitDataValidator {
     private static byte[] checkString(Map<String, String> fields) {
         StringJoiner lines = new StringJoiner("\n");
         fields.forEach((key, value) -> {
-            if (!key.equals("hash") && !key.equals("signature")) {
+            if (!key.equals("hash")) {
                 lines.add(key + "=" + value);
             }
         });

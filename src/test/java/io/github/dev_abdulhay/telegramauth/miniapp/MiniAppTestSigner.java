@@ -23,7 +23,7 @@ public final class MiniAppTestSigner {
     public static String sign(String botToken, Map<String, String> fields) {
         StringJoiner checkString = new StringJoiner("\n");
         new TreeMap<>(fields).forEach((k, v) -> {
-            if (!k.equals("hash") && !k.equals("signature")) {
+            if (!k.equals("hash")) {
                 checkString.add(k + "=" + v);
             }
         });

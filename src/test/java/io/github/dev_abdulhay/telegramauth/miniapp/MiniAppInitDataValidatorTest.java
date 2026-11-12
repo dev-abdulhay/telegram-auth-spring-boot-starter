@@ -75,10 +75,14 @@ class MiniAppInitDataValidatorTest {
     }
 
     @Test
-    void signatureFieldIsExcludedFromCheckString() {
-        String raw = MiniAppTestSigner.sign(TOKEN, fields(NOW)) + "&signature=abc";
+    void signatureFieldIsCoveredByHash() {
+        Map<String, String> f = fields(NOW);
+        f.put("signature", "abc");
+        String signed = MiniAppTestSigner.sign(TOKEN, f);
 
-        assertThat(validate(raw).user().telegramId()).isEqualTo(42L);
+        assertThat(validate(signed).user().telegramId()).isEqualTo(42L);
+        assertError(MiniAppTestSigner.sign(TOKEN, fields(NOW)) + "&signature=abc", MiniAppError.INIT_DATA_INVALID);
+        assertError(signed.replace("signature=abc", "signature=xyz"), MiniAppError.INIT_DATA_INVALID);
     }
 
     @Test
