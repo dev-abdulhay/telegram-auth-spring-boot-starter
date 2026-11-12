@@ -137,6 +137,43 @@ class MiniAppInitDataValidatorTest {
     }
 
     @Test
+    void missingAuthDateIsInvalid() {
+        Map<String, String> f = fields(NOW);
+        f.remove("auth_date");
+
+        assertError(MiniAppTestSigner.sign(TOKEN, f), MiniAppError.INIT_DATA_INVALID);
+    }
+
+    @Test
+    void userWithoutIdIsInvalid() {
+        Map<String, String> f = fields(NOW);
+        f.put("user", "{\"first_name\":\"Ali\"}");
+
+        assertError(MiniAppTestSigner.sign(TOKEN, f), MiniAppError.INIT_DATA_INVALID);
+    }
+
+    @Test
+    void pairWithoutEqualsIsInvalid() {
+        assertError(MiniAppTestSigner.sign(TOKEN, fields(NOW)) + "&orphan", MiniAppError.INIT_DATA_INVALID);
+    }
+
+    @Test
+    void badPercentEscapeIsInvalid() {
+        assertError("start_param=%zz&" + MiniAppTestSigner.sign(TOKEN, fields(NOW)), MiniAppError.INIT_DATA_INVALID);
+    }
+
+    @Test
+    void optionsRejectNullAndNegativeDurations() {
+        assertThatThrownBy(() -> new MiniAppOptions(null, Duration.ZERO)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new MiniAppOptions(Duration.ZERO, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new MiniAppOptions(Duration.ofSeconds(-1), Duration.ZERO))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new MiniAppOptions(Duration.ZERO, Duration.ofSeconds(-1)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(new MiniAppOptions(Duration.ZERO, Duration.ZERO).maxAge()).isZero();
+    }
+
+    @Test
     void blankInitDataIsMissing() {
         assertError(null, MiniAppError.INIT_DATA_MISSING);
         assertError("  ", MiniAppError.INIT_DATA_MISSING);

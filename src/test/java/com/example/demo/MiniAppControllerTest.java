@@ -2,6 +2,8 @@ package com.example.demo;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.dev_abdulhay.telegramauth.api.dto.AuthApproveResult;
+import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.entity.BaseTelegramUser;
 import io.github.dev_abdulhay.telegramauth.miniapp.InMemoryInitDataReplayStore;
 import io.github.dev_abdulhay.telegramauth.miniapp.InitDataReplayStore;
@@ -18,6 +20,7 @@ import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -78,6 +81,7 @@ class MiniAppControllerTest {
     @Autowired MockMvc mvc;
     @Autowired DemoUserRepository users;
     @Autowired DemoSessionService sessionService;
+    @Autowired DemoUserService userService;
     @Autowired RecordingReplayStore replayStore;
     private final ObjectMapper json = new ObjectMapper();
 
@@ -181,6 +185,28 @@ class MiniAppControllerTest {
         postMiniApp("/api/legacy-auth/miniapp", Map.of("initData", initData(44, "ali", null)))
                 .andExpect(status().isNotFound());
         mvc.perform(post("/api/legacy-auth/session")).andExpect(status().isOk());
+    }
+
+    @Test
+    void controllerThatDoesNotMapMiniAppHasNoRoute() throws Exception {
+        // 3-arg constructor and a module with miniApp(...): still no route, the subclass never mapped one
+        postMiniApp("/api/not-opted-in-auth/miniapp", Map.of("initData", initData(45, "ali", null)))
+                .andExpect(status().isNotFound());
+        mvc.perform(post("/api/not-opted-in-auth/session")).andExpect(status().isOk());
+    }
+
+    @Test
+    void optedInControllerIs404WhenModuleHasNoMiniApp() throws Exception {
+        TelegramBotModule noMiniApp = TelegramBotModule.builder(BOT_TOKEN, "demo_bot")
+                .approveHandler((info, ctx) -> new AuthApproveResult(Map.of("tgId", info.telegramId())))
+                .build();
+        MockMvc standalone = MockMvcBuilders
+                .standaloneSetup(new DemoAuthController(sessionService, noMiniApp, userService))
+                .build();
+        standalone.perform(post("/api/demo-auth/miniapp").contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("initData", initData(46, "ali", null)))))
+                .andExpect(status().isNotFound());
+        assertThat(users.findByTelegramId(46L)).isEmpty();
     }
 
     @Test

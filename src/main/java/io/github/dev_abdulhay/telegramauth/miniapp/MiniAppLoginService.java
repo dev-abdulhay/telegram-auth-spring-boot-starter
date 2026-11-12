@@ -58,7 +58,12 @@ public class MiniAppLoginService<U extends BaseTelegramUser> {
             result = module.getMiniAppHandler().onApprove(info,
                     new AuthContext(ip, userAgent, hostRef, AuthChannel.MINI_APP, data.startParam()));
         } catch (Throwable e) {
-            replayStore.release(data.hash());
+            try {
+                replayStore.release(data.hash());
+            } catch (Throwable releaseFailure) {
+                // the caller needs the original cause; the release failure rides along
+                e.addSuppressed(releaseFailure);
+            }
             throw e;
         }
         return result.payload();

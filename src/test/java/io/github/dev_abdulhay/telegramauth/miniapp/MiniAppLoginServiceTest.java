@@ -34,6 +34,10 @@ class MiniAppLoginServiceTest {
     private final AtomicInteger calls = new AtomicInteger();
 
     private MiniAppLoginService<DemoUser> service(TelegramAuthApproveHandler handler) {
+        return service(handler, new InMemoryInitDataReplayStore(clock));
+    }
+
+    private MiniAppLoginService<DemoUser> service(TelegramAuthApproveHandler handler, InitDataReplayStore store) {
         TelegramBotModule module = TelegramBotModule.builder(TOKEN, "demo_bot")
                 .bot(new TelegramBot(HttpClient.newHttpClient(), TOKEN))
                 .miniApp(MiniAppOptions.defaults())
@@ -42,8 +46,7 @@ class MiniAppLoginServiceTest {
                     return handler.onApprove(info, ctx);
                 })
                 .build();
-        return new MiniAppLoginService<>(module, new DemoUserService(repo),
-                new InMemoryInitDataReplayStore(clock), clock);
+        return new MiniAppLoginService<>(module, new DemoUserService(repo), store, clock);
     }
 
     private static AuthApproveResult ok(long telegramId) {
@@ -79,6 +82,30 @@ class MiniAppLoginServiceTest {
 
         // a successful login does burn it
         assertError(() -> service.login(raw, "1.1.1.1", "ua", null), MiniAppError.INIT_DATA_EXPIRED);
+    }
+
+    @Test
+    void releaseFailureIsSuppressedAndOriginalRethrown() {
+        InitDataReplayStore brokenRelease = new InitDataReplayStore() {
+            @Override
+            public boolean claim(String hash, Instant expiresAt) {
+                return true;
+            }
+
+            @Override
+            public void release(String hash) {
+                throw new IllegalStateException("store down");
+            }
+        };
+        MiniAppLoginService<DemoUser> service = service((info, ctx) -> {
+            throw new RuntimeException("host handler down");
+        }, brokenRelease);
+
+        assertThatThrownBy(() -> service.login(initData(42), "1.1.1.1", "ua", null))
+                .isInstanceOf(RuntimeException.class).hasMessage("host handler down")
+                .satisfies(e -> assertThat(e.getSuppressed()).singleElement()
+                        .isInstanceOf(IllegalStateException.class)
+                        .extracting(Throwable::getMessage).isEqualTo("store down"));
     }
 
     @Test

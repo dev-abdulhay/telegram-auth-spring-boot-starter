@@ -31,7 +31,7 @@ public final class AuthContext {
         this.ipAddress = ipAddress;
         this.userAgent = userAgent;
         this.hostRef = hostRef;
-        this.channel = channel;
+        this.channel = channel == null ? AuthChannel.BOT_LOGIN : channel;
         this.startParam = startParam;
     }
 

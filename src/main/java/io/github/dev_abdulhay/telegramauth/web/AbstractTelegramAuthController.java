@@ -61,7 +61,7 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
         this(sessionService, module, null);
     }
 
-    /** Also enables {@code POST /miniapp} when the module has {@code miniApp(...)} options. */
+    /** Also enables {@link #miniAppLogin} when the module has {@code miniApp(...)} options. */
     protected AbstractTelegramAuthController(AbstractSessionService<U, S> sessionService, TelegramBotModule module,
                                              AbstractTelegramUserService<U> userService) {
         this.sessionService = sessionService;
@@ -196,10 +196,18 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
      * {@code initData} field of the body is read; anything else (a {@code telegramId},
      * a {@code hostRef}) is ignored. 404 unless this controller was given a user service
      * and the module enabled {@code miniApp(...)}.
+     *
+     * <p>Not mapped here, so upgrading adds no route that could collide with one the host
+     * already has. A subclass opts in by mapping it itself:
+     * <pre>
+     * &#64;PostMapping("/miniapp")
+     * public ResponseEntity&lt;?&gt; miniApp(&#64;RequestBody(required = false) Map&lt;String, Object&gt; body,
+     *                                  HttpServletRequest req) {
+     *     return miniAppLogin(body, req);
+     * }
+     * </pre>
      */
-    @PostMapping("/miniapp")
-    public ResponseEntity<?> miniApp(@RequestBody(required = false) Map<String, Object> body,
-                                     HttpServletRequest req) {
+    protected ResponseEntity<?> miniAppLogin(Map<String, Object> body, HttpServletRequest req) {
         if (miniAppLoginService == null || module.getMiniAppOptions().isEmpty()) {
             return ResponseEntity.notFound().build();
         }
