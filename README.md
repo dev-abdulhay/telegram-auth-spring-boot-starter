@@ -270,7 +270,7 @@ Paths are relative to the subclass's `@RequestMapping` prefix (e.g. `/api/admin-
 | `GET`  | `/session/{token}/poll[?since=]` | Long-poll for the next state the client has not seen; releases on approve / reject / expire (and on the code step, with `since=PENDING`). |
 | `GET`  | `/session/{token}/status` | Cheap status check → `{ status, expiresAt }`. Never returns the confirmation code. |
 | `DELETE` | `/session/{token}` | Client aborts a session that is still `PENDING` or `AWAITING_CODE`. |
-| `POST` | `/miniapp` | Opt-in. Telegram Mini App login from signed `initData` → `{ status:"APPROVED", payload }`; see [Mini App login](#mini-app-login). `404` unless enabled. |
+| `POST` | `/miniapp` | Opt-in, and **not mapped by the base class**: your subclass maps it with a 3-line override. Telegram Mini App login from signed `initData` → `{ status:"APPROVED", payload }`; see [Mini App login](#mini-app-login). |
 
 `poll` responses: `200 { status:"APPROVED", payload:{…} }` on approval,
 `202 { status:"AWAITING_CODE", confirmCode: 42 }` when the browser must show its
@@ -357,7 +357,7 @@ dance. It is **off by default**.
 
 ### Enabling it
 
-Two switches, both required:
+Three steps, all required:
 
 ```java
 TelegramBotModule.builder()
@@ -373,9 +373,22 @@ public MyAuthController(MySessionService sessionService, TelegramBotModule modul
 }
 ```
 
-A module without `.miniApp(...)`, or a controller still on the 2-arg
-constructor, answers `POST /miniapp` with `404`. Tune the window with
-`new MiniAppOptions(maxAge, maxFutureSkew)`.
+The base class does **not** map the endpoint, so upgrading never adds a route
+that could collide with one you already have. Map it yourself in your subclass;
+the path is yours to choose:
+
+```java
+@PostMapping("/miniapp")
+public ResponseEntity<?> miniApp(@RequestBody(required = false) Map<String, Object> body,
+                                 HttpServletRequest req) {
+    return miniAppLogin(body, req);
+}
+```
+
+`miniAppLogin` answers `404` when the module has no `.miniApp(...)` or the
+controller is on the 2-arg constructor. A subclass without the override has no
+`/miniapp` route at all. Tune the window with
+`new MiniAppOptions(maxAge, maxFutureSkew)` (both non-null, neither negative).
 
 ### Request and response
 
@@ -415,6 +428,11 @@ if (ctx.getChannel() == AuthChannel.MINI_APP) {
 `TelegramUserInfo.phone()` is `null` for Mini App logins: `initData` carries no
 phone number. A handler that returns `null`, or a `null` payload, is not
 guarded, exactly as with bot login.
+
+A first-time user's row is created (`ACTIVE`) **before** your handler runs, and
+it stays if the handler throws. Bot login is different: it registers the user
+only at the last confirmation step. If your handler can fail for a new user,
+make it tolerate a row that already exists on the retry.
 
 ### Replay protection
 
@@ -661,8 +679,21 @@ plus optional `bot(…)` / `eventBus(…)` overrides.
 ## Upgrading to 0.7.0
 
 No breaking changes and no schema changes. Mini App login is opt-in; a host that
-does nothing behaves exactly as on 0.6.1. To use it, follow
-[Mini App login](#mini-app-login).
+does nothing behaves exactly as on 0.6.1. In particular, **no new route
+appears**: `AbstractTelegramAuthController` does not map `/miniapp`, so a host
+that already serves its own `{prefix}/miniapp` keeps it without an
+"Ambiguous mapping" error. To use the starter's endpoint, switch to the 3-arg
+constructor, enable `.miniApp(...)` on the module and opt in with:
+
+```java
+@PostMapping("/miniapp")
+public ResponseEntity<?> miniApp(@RequestBody(required = false) Map<String, Object> body,
+                                 HttpServletRequest req) {
+    return miniAppLogin(body, req);
+}
+```
+
+The rest is in [Mini App login](#mini-app-login).
 
 ## Upgrading to 0.6.1
 
@@ -1745,6 +1776,40 @@ takes one `AbstractSessionService` and one `TelegramBotModule` in its
 constructor, fixed for the life of the bean. A white-label host writes its own
 controller that resolves both per request, as sketched above.
 
+### Mini App login for white-label tenant bots
+
+`TenantBotRegistry` hands back only a tenant's session service, and your tenant
+controller is not an `AbstractTelegramAuthController`, so wire Mini App login
+yourself:
+
+1. Set `.miniApp(MiniAppOptions.defaults())` on the module your
+   `TenantBotFactory` builds.
+2. Keep the tenant modules yourself: the registry does not expose them. The
+   simplest place is the factory, which runs again on every (re)start.
+3. Build and cache one `MiniAppLoginService` per tenant, sharing the
+   `InitDataReplayStore` bean (hashes are per bot token, so one store serves
+   every tenant).
+
+```java
+private final Map<Long, MiniAppLoginService<TenantUser>> miniAppLogins = new ConcurrentHashMap<>();
+
+// add `InitDataReplayStore replayStore` (the auto-configured bean) to the factory
+// method's parameters; then, inside the lambda, after building `module`:
+miniAppLogins.put(bot.botUserId(),
+        new MiniAppLoginService<>(module, users, replayStore, Clock.systemUTC()));
+```
+
+In your tenant controller, resolve the tenant as for bot login and call
+`login(initData, ip, userAgent, hostRef)` on that tenant's service. Map
+`MiniAppAuthException` yourself, or every Mini App error turns into a `500`:
+
+```java
+@ExceptionHandler(MiniAppAuthException.class)
+ResponseEntity<Map<String, String>> onMiniAppAuthFailed(MiniAppAuthException e) {
+    return ResponseEntity.status(e.error().httpStatus()).body(Map.of("error", e.error().code()));
+}
+```
+
 ### Adding a tenant's own commands
 
 `ManagedBotCustomizer` runs against each bot the runtime has just built, right
@@ -2260,7 +2325,7 @@ is already registered. `TelegramBot` gains `sendInvoice`, `createInvoiceLink`,
 - [x] Host-account linking: an opaque `hostRef` set server-side at session creation reaches the approve handler, so a host can tell a login from a link.
 - [x] White-label tenant bots (opt-in): a long-poll runtime per managed bot, per-tenant rate limiting, startup restore, poll-failure budget. Single instance only.
 - [x] Telegram Stars payments (opt-in): invoices, subscriptions, refunds, reconciler, optional credits ledger.
-- [x] Mini App login (opt-in): `POST /miniapp` verifies Telegram `initData` (HMAC, TTL, replay claim) and runs the approve handler. Single instance with the default replay store.
+- [x] Mini App login (opt-in, mapped by your subclass): `POST /miniapp` verifies Telegram `initData` (HMAC, TTL, replay claim) and runs the approve handler. Single instance with the default replay store.
 - [ ] SSE & WebSocket transports.
 - [ ] Redis-backed event bus + multi-instance horizontal scaling (would also make in-flight login state survive failover).
 

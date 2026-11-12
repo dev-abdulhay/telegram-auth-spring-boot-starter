@@ -16,8 +16,10 @@ No breaking changes; Mini App login is opt-in. See
   verifies it (HMAC with the bot token, `maxAge` 1 h, future skew 60 s) and runs the
   approve handler with `AuthContext.getChannel() == AuthChannel.MINI_APP` and
   `getStartParam()`. Enable it with `.miniApp(MiniAppOptions.defaults())` on the module
-  and the new 3-arg `AbstractTelegramAuthController` constructor; optional
-  `.miniAppHandler(...)`. Errors: `init_data_missing` 400, `init_data_invalid` 401,
+  and the new 3-arg `AbstractTelegramAuthController` constructor, then map the route in
+  your subclass with a `@PostMapping("/miniapp")` method that returns
+  `miniAppLogin(body, req)`; the base class maps nothing, so no route is added on
+  upgrade. Optional `.miniAppHandler(...)`. Errors: `init_data_missing` 400, `init_data_invalid` 401,
   `init_data_expired` 401, `user_blocked` 403.
 - **Replay protection.** `InitDataReplayStore` (`claim` / `release`) with an in-memory
   default, `InMemoryInitDataReplayStore`; single instance only, provide a shared store
