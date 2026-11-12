@@ -56,9 +56,9 @@ public class TelegramAuthAutoConfiguration {
     }
 
     /**
-     * Remembers redeemed Mini App initData so it cannot log in twice. Per-instance
-     * only — declare your own {@link InitDataReplayStore} bean (e.g. Redis-backed)
-     * when several instances serve {@code /miniapp}.
+     * Claims redeemed Mini App initData so it cannot log in twice. Per-instance
+     * only — when several instances serve {@code /miniapp}, declare your own shared
+     * {@link InitDataReplayStore} bean whose claim is atomic (e.g. Redis {@code SET NX}).
      */
     @Bean
     @ConditionalOnMissingBean

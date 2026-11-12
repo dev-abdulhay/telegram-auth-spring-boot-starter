@@ -3,6 +3,7 @@ package io.github.dev_abdulhay.telegramauth.miniapp;
 import com.example.demo.DemoUser;
 import com.example.demo.DemoUserService;
 import com.example.demo.StubUserRepo;
+import io.github.dev_abdulhay.telegramauth.api.TelegramAuthApproveHandler;
 import io.github.dev_abdulhay.telegramauth.api.dto.AuthApproveResult;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBot;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
@@ -15,6 +16,9 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -29,19 +33,21 @@ class MiniAppLoginServiceTest {
     private final StubUserRepo repo = new StubUserRepo();
     private final AtomicInteger calls = new AtomicInteger();
 
-    private MiniAppLoginService<DemoUser> service(boolean failFirst) {
+    private MiniAppLoginService<DemoUser> service(TelegramAuthApproveHandler handler) {
         TelegramBotModule module = TelegramBotModule.builder(TOKEN, "demo_bot")
                 .bot(new TelegramBot(HttpClient.newHttpClient(), TOKEN))
                 .miniApp(MiniAppOptions.defaults())
                 .approveHandler((info, ctx) -> {
-                    if (calls.incrementAndGet() == 1 && failFirst) {
-                        throw new RuntimeException("host handler down");
-                    }
-                    return new AuthApproveResult(Map.of("tgId", info.telegramId()));
+                    calls.incrementAndGet();
+                    return handler.onApprove(info, ctx);
                 })
                 .build();
         return new MiniAppLoginService<>(module, new DemoUserService(repo),
                 new InMemoryInitDataReplayStore(clock), clock);
+    }
+
+    private static AuthApproveResult ok(long telegramId) {
+        return new AuthApproveResult(Map.of("tgId", telegramId));
     }
 
     private String initData(long telegramId) {
@@ -51,9 +57,19 @@ class MiniAppLoginServiceTest {
         return MiniAppTestSigner.sign(TOKEN, f);
     }
 
+    private static void assertError(Runnable call, MiniAppError expected) {
+        assertThatThrownBy(call::run).isInstanceOfSatisfying(MiniAppAuthException.class,
+                e -> assertThat(e.error()).isEqualTo(expected));
+    }
+
     @Test
     void handlerFailureDoesNotBurnHash() {
-        MiniAppLoginService<DemoUser> service = service(true);
+        MiniAppLoginService<DemoUser> service = service((info, ctx) -> {
+            if (calls.get() == 1) {
+                throw new RuntimeException("host handler down");
+            }
+            return ok(info.telegramId());
+        });
         String raw = initData(42);
 
         assertThatThrownBy(() -> service.login(raw, "1.1.1.1", "ua", null))
@@ -62,9 +78,7 @@ class MiniAppLoginServiceTest {
         assertThat(service.login(raw, "1.1.1.1", "ua", null)).containsEntry("tgId", 42L);
 
         // a successful login does burn it
-        assertThatThrownBy(() -> service.login(raw, "1.1.1.1", "ua", null))
-                .isInstanceOfSatisfying(MiniAppAuthException.class,
-                        e -> assertThat(e.error()).isEqualTo(MiniAppError.INIT_DATA_EXPIRED));
+        assertError(() -> service.login(raw, "1.1.1.1", "ua", null), MiniAppError.INIT_DATA_EXPIRED);
     }
 
     @Test
@@ -73,11 +87,42 @@ class MiniAppLoginServiceTest {
         blocked.setTelegramId(77L);
         blocked.setStatus(BaseTelegramUser.Status.BLOCKED);
         repo.save(blocked);
-        MiniAppLoginService<DemoUser> service = service(false);
+        MiniAppLoginService<DemoUser> service = service((info, ctx) -> ok(info.telegramId()));
+        String raw = initData(77);
 
-        assertThatThrownBy(() -> service.login(initData(77), "1.1.1.1", "ua", null))
-                .isInstanceOfSatisfying(MiniAppAuthException.class,
-                        e -> assertThat(e.error()).isEqualTo(MiniAppError.USER_BLOCKED));
+        assertError(() -> service.login(raw, "1.1.1.1", "ua", null), MiniAppError.USER_BLOCKED);
+        // the claim was released, so a retry reaches the BLOCKED check again rather than reading as a replay
+        assertError(() -> service.login(raw, "1.1.1.1", "ua", null), MiniAppError.USER_BLOCKED);
         assertThat(calls).hasValue(0);
+    }
+
+    @Test
+    void concurrentLoginsWithSameInitDataOnlyOneSucceeds() throws Exception {
+        CountDownLatch inHandler = new CountDownLatch(1);
+        CountDownLatch proceed = new CountDownLatch(1);
+        MiniAppLoginService<DemoUser> service = service((info, ctx) -> {
+            inHandler.countDown();
+            try {
+                if (!proceed.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("test latch timed out");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+            return ok(info.telegramId());
+        });
+        String raw = initData(42);
+
+        CompletableFuture<Map<String, Object>> first =
+                CompletableFuture.supplyAsync(() -> service.login(raw, "1.1.1.1", "ua", null));
+        assertThat(inHandler.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // the first login is still inside the handler: the second must not get through
+        assertError(() -> service.login(raw, "2.2.2.2", "ua", null), MiniAppError.INIT_DATA_EXPIRED);
+
+        proceed.countDown();
+        assertThat(first.get(5, TimeUnit.SECONDS)).containsEntry("tgId", 42L);
+        assertThat(calls).hasValue(1);
     }
 }

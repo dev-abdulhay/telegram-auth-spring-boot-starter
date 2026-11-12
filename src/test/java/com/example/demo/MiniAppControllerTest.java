@@ -3,22 +3,30 @@ package com.example.demo;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.dev_abdulhay.telegramauth.entity.BaseTelegramUser;
+import io.github.dev_abdulhay.telegramauth.miniapp.InMemoryInitDataReplayStore;
+import io.github.dev_abdulhay.telegramauth.miniapp.InitDataReplayStore;
 import io.github.dev_abdulhay.telegramauth.miniapp.MiniAppTestSigner;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
@@ -29,6 +37,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest(classes = DemoApp.class, webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
+@Import(MiniAppControllerTest.ReplayStoreConfig.class)
 @TestPropertySource(properties = {
         "telegram.auth.enabled=true",
         "spring.datasource.url=jdbc:h2:mem:miniappctrl;DB_CLOSE_DELAY=-1",
@@ -38,12 +47,38 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 })
 class MiniAppControllerTest {
 
+    /** A host-provided store; it must replace the auto-configured one and be what the controller claims on. */
+    static class RecordingReplayStore implements InitDataReplayStore {
+        final List<String> claimed = new CopyOnWriteArrayList<>();
+        private final InitDataReplayStore delegate = new InMemoryInitDataReplayStore(Clock.systemUTC());
+
+        @Override
+        public boolean claim(String hash, Instant expiresAt) {
+            claimed.add(hash);
+            return delegate.claim(hash, expiresAt);
+        }
+
+        @Override
+        public void release(String hash) {
+            delegate.release(hash);
+        }
+    }
+
+    @TestConfiguration
+    static class ReplayStoreConfig {
+        @Bean
+        RecordingReplayStore recordingReplayStore() {
+            return new RecordingReplayStore();
+        }
+    }
+
     /** {@link DemoTgConfig}'s bot token. */
     private static final String BOT_TOKEN = "TEST";
 
     @Autowired MockMvc mvc;
     @Autowired DemoUserRepository users;
     @Autowired DemoSessionService sessionService;
+    @Autowired RecordingReplayStore replayStore;
     private final ObjectMapper json = new ObjectMapper();
 
     /** Fresh signed initData; a unique {@code query_id} keeps hashes distinct across tests sharing the replay store. */
@@ -111,6 +146,17 @@ class MiniAppControllerTest {
         postMiniApp("/api/demo-auth/miniapp", Map.of("initData", raw))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.error").value("init_data_expired"));
+    }
+
+    @Test
+    void customReplayStoreBeanIsTheOneTheControllerUses(@Autowired List<InitDataReplayStore> stores) throws Exception {
+        assertThat(stores).containsExactly(replayStore);
+        String raw = initData(45, "ali", null);
+        String hash = raw.substring(raw.lastIndexOf("hash=") + "hash=".length());
+
+        postMiniApp("/api/demo-auth/miniapp", Map.of("initData", raw)).andExpect(status().isOk());
+
+        assertThat(replayStore.claimed).contains(hash);
     }
 
     @Test

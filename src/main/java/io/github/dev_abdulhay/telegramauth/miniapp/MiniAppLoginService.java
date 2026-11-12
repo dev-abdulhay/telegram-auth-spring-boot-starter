@@ -41,21 +41,26 @@ public class MiniAppLoginService<U extends BaseTelegramUser> {
         MiniAppOptions options = module.getMiniAppOptions()
                 .orElseThrow(() -> new IllegalStateException("Mini App login is not enabled on this module"));
         MiniAppInitData data = validator.validate(rawInitData, module.getBotToken(), options, clock.instant());
-        if (replayStore.isUsed(data.hash())) {
+        // claimed up front so a concurrent request with the same initData is refused at once;
+        // every path that does not end in a login releases it, so the initData can be retried
+        if (!replayStore.claim(data.hash(), data.authDate().plus(options.maxAge()))) {
             throw new MiniAppAuthException(MiniAppError.INIT_DATA_EXPIRED, "initData was already used");
         }
 
         TelegramUserInfo info = data.user();
-        U user = userService.register(info.telegramId(), null, info.firstName(), info.lastName(),
-                info.username(), info.languageCode());
-        if (user.getStatus() == BaseTelegramUser.Status.BLOCKED) {
-            throw new MiniAppAuthException(MiniAppError.USER_BLOCKED, "user is blocked");
+        AuthApproveResult result;
+        try {
+            U user = userService.register(info.telegramId(), null, info.firstName(), info.lastName(),
+                    info.username(), info.languageCode());
+            if (user.getStatus() == BaseTelegramUser.Status.BLOCKED) {
+                throw new MiniAppAuthException(MiniAppError.USER_BLOCKED, "user is blocked");
+            }
+            result = module.getMiniAppHandler().onApprove(info,
+                    new AuthContext(ip, userAgent, hostRef, AuthChannel.MINI_APP, data.startParam()));
+        } catch (Throwable e) {
+            replayStore.release(data.hash());
+            throw e;
         }
-
-        AuthApproveResult result = module.getMiniAppHandler().onApprove(info,
-                new AuthContext(ip, userAgent, hostRef, AuthChannel.MINI_APP, data.startParam()));
-        // burned only after the handler succeeded, so a host-side failure can be retried with the same initData
-        replayStore.markUsed(data.hash(), data.authDate().plus(options.maxAge()));
         return result.payload();
     }
 }
