@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-13
+
+No breaking changes; Mini App login is opt-in. See
+[Mini App login](README.md#mini-app-login) and
+[Upgrading to 0.7.0](README.md#upgrading-to-070).
+
+### Added
+- **Telegram Mini App login.** `POST {prefix}/miniapp` takes `{"initData": "…"}`,
+  verifies it (HMAC with the bot token, `maxAge` 1 h, future skew 60 s) and runs the
+  approve handler with `AuthContext.getChannel() == AuthChannel.MINI_APP` and
+  `getStartParam()`. Enable it with `.miniApp(MiniAppOptions.defaults())` on the module
+  and the new 3-arg `AbstractTelegramAuthController` constructor; optional
+  `.miniAppHandler(...)`. Errors: `init_data_missing` 400, `init_data_invalid` 401,
+  `init_data_expired` 401, `user_blocked` 403.
+- **Replay protection.** `InitDataReplayStore` (`claim` / `release`) with an in-memory
+  default, `InMemoryInitDataReplayStore`; single instance only, provide a shared store
+  when running several.
+- `AuthChannel` (`BOT_LOGIN`, `MINI_APP`) on `AuthContext`.
+
 ## [0.6.1] - 2026-11-11
 
 Hosts on JPA with their own migrations must widen four columns; see
