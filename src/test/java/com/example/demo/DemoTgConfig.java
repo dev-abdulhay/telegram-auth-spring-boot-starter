@@ -5,11 +5,13 @@ import io.github.dev_abdulhay.telegramauth.bot.TelegramBot;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.flow.CodeConfirmation;
 import io.github.dev_abdulhay.telegramauth.flow.DefaultAuthFlow;
+import io.github.dev_abdulhay.telegramauth.miniapp.MiniAppOptions;
 import io.github.dev_abdulhay.telegramauth.security.TokenGenerator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.net.http.HttpClient;
+import java.util.HashMap;
 import java.util.Map;
 
 @Configuration
@@ -28,7 +30,16 @@ public class DemoTgConfig {
         return TelegramBotModule.builder("TEST", "demo_bot")
                 .bot(fakeBot)
                 .trustProxyHeaders(true)
-                .approveHandler((info, ctx) -> new AuthApproveResult(Map.of("tgId", info.telegramId())))
+                .miniApp(MiniAppOptions.defaults())
+                .approveHandler((info, ctx) -> {
+                    // channel/startParam are echoed so tests can see which login path ran;
+                    // HashMap because startParam is null on a bot login
+                    Map<String, Object> payload = new HashMap<>();
+                    payload.put("tgId", info.telegramId());
+                    payload.put("channel", ctx.getChannel().name());
+                    payload.put("startParam", ctx.getStartParam());
+                    return new AuthApproveResult(payload);
+                })
                 .build();
     }
 

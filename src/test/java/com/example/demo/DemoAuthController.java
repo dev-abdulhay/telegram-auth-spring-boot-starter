@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/demo-auth")
 public class DemoAuthController extends AbstractTelegramAuthController<DemoUser, DemoSession> {
-    public DemoAuthController(DemoSessionService service, TelegramBotModule module) {
-        super(service, module);
+    public DemoAuthController(DemoSessionService service, TelegramBotModule module, DemoUserService users) {
+        super(service, module, users);
     }
 }
