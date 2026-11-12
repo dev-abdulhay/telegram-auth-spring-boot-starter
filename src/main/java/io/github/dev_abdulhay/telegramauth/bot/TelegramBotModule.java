@@ -3,6 +3,7 @@ package io.github.dev_abdulhay.telegramauth.bot;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.dev_abdulhay.telegramauth.api.TelegramAuthApproveHandler;
 import io.github.dev_abdulhay.telegramauth.api.dto.AuthApproveResult;
+import io.github.dev_abdulhay.telegramauth.miniapp.MiniAppOptions;
 import io.github.dev_abdulhay.telegramauth.security.ConfirmCode;
 import io.github.dev_abdulhay.telegramauth.security.ConfirmCodeGenerator;
 import io.github.dev_abdulhay.telegramauth.service.AuthEventBus;
@@ -12,6 +13,7 @@ import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -35,6 +37,8 @@ public final class TelegramBotModule {
     private final boolean trustProxyHeaders;
     private final int trustedProxyHops;
     private final TelegramAuthApproveHandler approveHandler;
+    private final MiniAppOptions miniAppOptions;
+    private final TelegramAuthApproveHandler miniAppHandler;
     private final TelegramBot bot;
     private final AuthEventBus bus;
     private final ConfirmCodeGenerator confirmCodeGenerator;
@@ -62,6 +66,8 @@ public final class TelegramBotModule {
         this.trustProxyHeaders = b.trustProxyHeaders;
         this.trustedProxyHops = Math.max(1, b.trustedProxyHops);
         this.approveHandler = b.approveHandler;
+        this.miniAppOptions = b.miniAppOptions;
+        this.miniAppHandler = b.miniAppHandler;
         this.bot = (b.bot != null) ? b.bot : new TelegramBot(HttpClient.newHttpClient(), b.botToken);
         this.bus = (b.bus != null) ? b.bus : new InMemoryAuthEventBus();
         this.confirmCodeGenerator =
@@ -227,6 +233,10 @@ public final class TelegramBotModule {
     public boolean isTrustProxyHeaders() { return trustProxyHeaders; }
     public int getTrustedProxyHops() { return trustedProxyHops; }
     public TelegramAuthApproveHandler getApproveHandler() { return approveHandler; }
+    public Optional<MiniAppOptions> getMiniAppOptions() { return Optional.ofNullable(miniAppOptions); }
+    public TelegramAuthApproveHandler getMiniAppHandler() {
+        return miniAppHandler != null ? miniAppHandler : approveHandler;
+    }
     public TelegramBot getBot() { return bot; }
     public AuthEventBus getBus() { return bus; }
     public ConfirmCodeGenerator getConfirmCodeGenerator() { return confirmCodeGenerator; }
@@ -248,6 +258,8 @@ public final class TelegramBotModule {
         private Long botUserId;
         private boolean trustProxyHeaders = false;
         private int trustedProxyHops = 1;
+        private MiniAppOptions miniAppOptions;
+        private TelegramAuthApproveHandler miniAppHandler;
         private TelegramAuthApproveHandler approveHandler = (info, ctx) -> new AuthApproveResult(Map.of());
         private TelegramBot bot;
         private AuthEventBus bus;
@@ -302,6 +314,10 @@ public final class TelegramBotModule {
          */
         public Builder trustedProxyHops(int v) { this.trustedProxyHops = v; return this; }
         public Builder approveHandler(TelegramAuthApproveHandler v) { this.approveHandler = v; return this; }
+        /** Opt in to Mini App initData login. Off by default. */
+        public Builder miniApp(MiniAppOptions v) { this.miniAppOptions = v; return this; }
+        /** Handler for Mini App logins; falls back to {@link #approveHandler} when unset. */
+        public Builder miniAppHandler(TelegramAuthApproveHandler v) { this.miniAppHandler = v; return this; }
         public Builder bot(TelegramBot v) { this.bot = v; return this; }
         public Builder eventBus(AuthEventBus v) { this.bus = v; return this; }
         /**
