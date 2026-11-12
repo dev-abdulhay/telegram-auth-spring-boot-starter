@@ -3,6 +3,8 @@ package io.github.dev_abdulhay.telegramauth.config;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotLifecycle;
 import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.flow.DefaultAuthFlow;
+import io.github.dev_abdulhay.telegramauth.miniapp.InMemoryInitDataReplayStore;
+import io.github.dev_abdulhay.telegramauth.miniapp.InitDataReplayStore;
 import io.github.dev_abdulhay.telegramauth.security.TokenGenerator;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -13,6 +15,8 @@ import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfigurat
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
+
+import java.time.Clock;
 
 /**
  * Activates the starter when {@code telegram.auth.enabled=true}. Registers only
@@ -49,5 +53,16 @@ public class TelegramAuthAutoConfiguration {
     @ConditionalOnMissingBean
     public DefaultAuthFlow.Options telegramAuthFlowOptions(TelegramAuthProperties properties) {
         return properties.getFlow().toOptions();
+    }
+
+    /**
+     * Claims redeemed Mini App initData so it cannot log in twice. Per-instance
+     * only — when several instances serve {@code /miniapp}, declare your own shared
+     * {@link InitDataReplayStore} bean whose claim is atomic (e.g. Redis {@code SET NX}).
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public InitDataReplayStore telegramAuthInitDataReplayStore() {
+        return new InMemoryInitDataReplayStore(Clock.systemUTC());
     }
 }

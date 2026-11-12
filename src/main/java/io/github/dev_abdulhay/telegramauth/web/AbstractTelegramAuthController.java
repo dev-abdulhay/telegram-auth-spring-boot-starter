@@ -6,7 +6,12 @@ import io.github.dev_abdulhay.telegramauth.bot.TelegramBotModule;
 import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession;
 import io.github.dev_abdulhay.telegramauth.entity.BaseAuthSession.Status;
 import io.github.dev_abdulhay.telegramauth.entity.BaseTelegramUser;
+import io.github.dev_abdulhay.telegramauth.miniapp.InMemoryInitDataReplayStore;
+import io.github.dev_abdulhay.telegramauth.miniapp.InitDataReplayStore;
+import io.github.dev_abdulhay.telegramauth.miniapp.MiniAppAuthException;
+import io.github.dev_abdulhay.telegramauth.miniapp.MiniAppLoginService;
 import io.github.dev_abdulhay.telegramauth.service.AbstractSessionService;
+import io.github.dev_abdulhay.telegramauth.service.AbstractTelegramUserService;
 import io.github.dev_abdulhay.telegramauth.service.AuthEvent;
 import io.github.dev_abdulhay.telegramauth.service.SessionRateLimitException;
 import io.github.dev_abdulhay.telegramauth.web.dto.CreateSessionRequest;
@@ -16,6 +21,7 @@ import io.github.dev_abdulhay.telegramauth.web.dto.WaitResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -27,6 +33,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.context.request.async.DeferredResult;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -46,10 +53,32 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
 
     protected final AbstractSessionService<U, S> sessionService;
     protected final TelegramBotModule module;
+    /** {@code null} for a controller built with the two-argument constructor: {@code miniAppLogin(...)} then returns 404. */
+    protected final AbstractTelegramUserService<U> userService;
+    private MiniAppLoginService<U> miniAppLoginService;
 
     protected AbstractTelegramAuthController(AbstractSessionService<U, S> sessionService, TelegramBotModule module) {
+        this(sessionService, module, null);
+    }
+
+    /** Also enables {@link #miniAppLogin} when the module has {@code miniApp(...)} options. */
+    protected AbstractTelegramAuthController(AbstractSessionService<U, S> sessionService, TelegramBotModule module,
+                                             AbstractTelegramUserService<U> userService) {
         this.sessionService = sessionService;
         this.module = module;
+        this.userService = userService;
+        if (userService != null) {
+            this.miniAppLoginService = new MiniAppLoginService<>(module, userService,
+                    new InMemoryInitDataReplayStore(Clock.systemUTC()), Clock.systemUTC());
+        }
+    }
+
+    /** Replaces the default in-memory replay store, e.g. with a shared one for multi-instance deployments. */
+    @Autowired(required = false)
+    public void setInitDataReplayStore(InitDataReplayStore replayStore) {
+        if (userService != null) {
+            this.miniAppLoginService = new MiniAppLoginService<>(module, userService, replayStore, Clock.systemUTC());
+        }
     }
 
     @PostMapping("/session")
@@ -160,6 +189,37 @@ public abstract class AbstractTelegramAuthController<U extends BaseTelegramUser,
             }
         });
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Mini App login: the user is whoever the verified {@code initData} says. Only the
+     * {@code initData} field of the body is read; anything else (a {@code telegramId},
+     * a {@code hostRef}) is ignored. 404 unless this controller was given a user service
+     * and the module enabled {@code miniApp(...)}.
+     *
+     * <p>Not mapped here, so upgrading adds no route that could collide with one the host
+     * already has. A subclass opts in by mapping it itself:
+     * <pre>
+     * &#64;PostMapping("/miniapp")
+     * public ResponseEntity&lt;?&gt; miniApp(&#64;RequestBody(required = false) Map&lt;String, Object&gt; body,
+     *                                  HttpServletRequest req) {
+     *     return miniAppLogin(body, req);
+     * }
+     * </pre>
+     */
+    protected ResponseEntity<?> miniAppLogin(Map<String, Object> body, HttpServletRequest req) {
+        if (miniAppLoginService == null || module.getMiniAppOptions().isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        Object initData = body == null ? null : body.get("initData");
+        Map<String, Object> payload = miniAppLoginService.login(initData instanceof String s ? s : null,
+                clientIp(req), req.getHeader("User-Agent"), hostRef(req));
+        return ResponseEntity.ok(new WaitResponse("APPROVED", payload));
+    }
+
+    @ExceptionHandler(MiniAppAuthException.class)
+    public ResponseEntity<Map<String, String>> onMiniAppAuthFailed(MiniAppAuthException e) {
+        return ResponseEntity.status(e.error().httpStatus()).body(Map.of("error", e.error().code()));
     }
 
     @ExceptionHandler(SessionRateLimitException.class)
